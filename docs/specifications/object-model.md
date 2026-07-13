@@ -27,6 +27,8 @@ Workspace
     ├── Pages
     │   ├── Layers
     │   │   └── Objects
+    │   ├── LogicalConnections
+    │   └── Wires
     ├── Assets
     ├── Plugins
     └── Metadata
@@ -67,6 +69,8 @@ Properties:
 - id
 - name
 - layers
+- logicalConnections
+- wires
 - viewport
 
 ---
@@ -101,14 +105,92 @@ Properties:
 Additional properties:
 
 - ports
+- pins
 - properties
 - behaviors
 - datasheet
 - category
 
+Ports and Pins are structural sub-components of Semantic Objects.
+
 ---
 
-# 10. Connection
+# 10. Port
+
+Properties:
+
+- id
+- name
+- kind
+- localPosition
+- signalType
+- metadata
+
+Rules:
+
+- A Port belongs to exactly one Semantic Object.
+- Port IDs are stable and unique within the project.
+- `localPosition` is expressed in the parent Semantic Object's local coordinate space.
+
+---
+
+# 11. Pin
+
+Properties:
+
+- id
+- name
+- number
+- localPosition
+- signalName
+- metadata
+
+Rules:
+
+- A Pin belongs to exactly one Semantic Object.
+- Pin IDs are stable and unique within the project.
+- `localPosition` is expressed in the parent Semantic Object's local coordinate space.
+
+---
+
+# 12. Endpoint
+
+Endpoint is a discriminated union.
+
+Common fields:
+
+- id
+- endpointType
+
+Endpoint types:
+
+- PORT
+- PIN
+- FLOATING
+
+PORT endpoint fields:
+
+- targetId
+
+PIN endpoint fields:
+
+- targetId
+
+FLOATING endpoint fields:
+
+- coordinate
+
+Rules:
+
+- A PORT endpoint requires `targetId`, references a valid Port ID, and forbids `coordinate`.
+- A PIN endpoint requires `targetId`, references a valid Pin ID, and forbids `coordinate`.
+- A FLOATING endpoint requires `coordinate`, represents a dangling endpoint, and forbids `targetId`.
+- Floating endpoints must not be represented with `null`.
+- Dangling endpoints are valid persisted state.
+
+---
+
+# 13. LogicalConnection
 
 Properties:
 
@@ -116,6 +198,7 @@ Properties:
 - source
 - target
 - connectionType
+- metadata
 
 Types:
 
@@ -124,9 +207,39 @@ Types:
 - Logical
 - Mechanical
 
+Rules:
+
+- `source` and `target` are Endpoint objects.
+- Endpoints may reference Ports or Pins, or may be Floating endpoints.
+- LogicalConnection is the single persisted owner of Endpoint objects.
+- LogicalConnection represents a logical or netlist relationship, not a routed visual trace.
+
 ---
 
-# 11. Asset
+# 14. Wire
+
+Properties:
+
+- id
+- logicalConnectionId
+- segments
+- style
+- metadata
+
+Rules:
+
+- Wire is the persisted segmented routed trace concept.
+- Wire references its semantic relationship using `logicalConnectionId`.
+- Wire must not persist Endpoint objects.
+- Endpoint identity must not be duplicated between LogicalConnection and Wire.
+- `segments` stores the routed physical or visual trace geometry.
+- Each segment stores `start` and `end` coordinate objects.
+- Multiple Wire records may reference the same LogicalConnection.
+- Wire geometry is separate from LogicalConnection semantics.
+
+---
+
+# 15. Asset
 
 Supported assets:
 
@@ -139,12 +252,20 @@ Supported assets:
 
 ---
 
-# 12. Metadata
+# 16. Metadata
 
 Metadata is extensible and must never break compatibility.
 
 ---
 
-# 13. Versioning
+# 17. Versioning
 
 Every serialized entity includes a schema version to support future migrations.
+
+---
+
+# 18. Forward Compatibility
+
+- Unknown fields must be preserved during load/save round trips.
+- Unknown plugin-defined object properties must not prevent project loading.
+- Serialization order must remain deterministic.
