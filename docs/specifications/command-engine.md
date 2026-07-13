@@ -40,10 +40,10 @@ The Command Engine does NOT:
 The Command Engine operates as a middleware layer between interactive systems and core data models:
 
 - **Upstream Callers**: The Tool System, UI Framework, Plugin SDK, and AI Integration request command execution.
-- **Downstream Targets**: The Command Engine applies changes directly to the Object Engine, Canvas Engine viewport parameters, and Core settings.
+- **Downstream Targets**: The Command Engine applies changes directly to the Object Engine and core settings. Viewport runtime state and pan/zoom are managed by the Canvas Engine and serialized via a page-state adapter.
 - **Supporting Infrastructure**:
-  - **History Engine**: Receives successfully executed commands to update history tracks.
-  - **Event Bus**: Dispatches events to notify external subscribers of execution status.
+  - **History Engine**: Receives instructions to record successfully executed commands to update history tracks, and requests reverse/replay operations through the Command Engine.
+  - **Event Bus**: Dispatches committed events to notify subscribers of execution status only after successful history recording.
   - **Validation Engine**: Performs checks against project schemas and model constraints.
   - **Serialization Engine**: Translates commands into structural data objects for the Storage Engine.
 
@@ -57,10 +57,10 @@ Every command undergoes a strictly defined lifecycle:
 - **Structural Validation**: The command validates its payload parameters against predefined schemas.
 - **Semantic Validation**: The command queries the current Object Engine state to ensure the requested mutation is logical and permitted.
 - **Pre-Execution Interception**: Plugins and internal services intercept the command to inspect, block, or modify it.
-- **Execution**: The command modifies the target data structures, storing a copy of the previous state or a reverse delta.
-- **Registration**: On success, the command is passed to the History Engine to be recorded on the undo stack.
-- **Event Notification**: An event is published to the Event Bus (e.g., CommandExecuted).
-- **Undo/Redo Actions**: When requested, the command rolls back or re-applies its mutations, updating the Event Bus accordingly.
+- **Execution**: The Command Engine invokes mutations on the Object Engine.
+- **Registration**: If and only if the Object Engine mutation returns a validated success, the Command Engine instructs the History Engine to record the command on the history DAG.
+- **Event Notification**: Only after successful history recording, the Command Engine publishes a committed event (e.g., `command:executed`) to the Event Bus. If validation or the Object Engine mutation fails, the History Engine is not notified, and no committed event is published.
+- **Undo/Redo (Reverse/Replay) Actions**: When requested by the History Engine, the Command Engine orchestrates inverse/forward mutations on the Object Engine using private pathways (`reverse` or `replay`) that bypass history logging.
 - **Disposal**: When evicted from history, the command instance is garbage collected.
 
 ---
@@ -139,45 +139,69 @@ Validation acts as the gatekeeper for document integrity:
 
 ---
 
-# 12. Execution Pipeline
+# 12. Conceptual Mutation Pathways and Execution Pipeline
 
-The processing pipeline for all command execution:
+All canonical mutations are orchestrated solely by the Command Engine through three distinct conceptual pathways:
 
-1. **Receive**: Command is dispatched to the Command Engine.
-2. **Intercept (Pre)**: Executing registered pre-execution filters.
-3. **Validate**: Run structural and semantic validation tests.
-4. **Mutate**: Apply mutations to the document state.
-5. **Record**: Pass the executed command reference to the History Engine.
-6. **Intercept (Post)**: Executing post-execution filters.
-7. **Publish**: Notify the Event Bus of success or failure.
+## 12.1. execute(command)
+This is the normal canonical mutation pathway. It enforces the following strict execution sequence:
+1. **Receive**: The Command Engine receives the dispatched command.
+2. **Pre-Execution Interception**: Registered pre-execution filters and plugin hooks inspect/intercept the command.
+3. **Validation**: The Command Engine runs structural and semantic validation. If validation fails, execution aborts, no history node is created, and no event is published.
+4. **Object Engine Mutation**: The Command Engine invokes the mutation on the Object Engine.
+5. **Success Verification**: The Object Engine processes the mutation in-memory and returns a validated success. If mutation fails, execution aborts, changes are rolled back, no history node is created, and no committed event is published.
+6. **History Recording**: The Command Engine instructs the History Engine to record the command on the active history DAG.
+7. **Post-Execution Interception**: Registered post-execution filters are executed.
+8. **Event Publication**: The Command Engine publishes the committed event (e.g., `command:executed`) to the Event Bus.
+
+## 12.2. reverse(command or history operation)
+This is the controlled inverse mutation pathway used for undo operations. It is requested by the History Engine and orchestrated through the Command Engine:
+1. **Request**: The History Engine resolves the target node to revert and requests a `reverse` operation from the Command Engine.
+2. **Object Engine Mutation**: The Command Engine applies the inverse mutation (reverse deltas) to the Object Engine using the private `executeReverseDelta` pathway.
+3. **Success Verification**: The Object Engine applies mutations and returns success. If this fails, the entire transaction is rolled back, the History Engine cursor is not updated, and an error is propagated.
+4. **History Update**: Upon successful mutation, the History Engine updates its cursor/state (moves active pointer). This pathway must not recursively create any new history nodes.
+5. **Event Publication**: The History Engine publishes the committed event (e.g., `history:undone`) to the Event Bus.
+
+## 12.3. replay(command or history operation)
+This is the controlled forward mutation pathway used for redo or crash recovery operations. It is requested by the History Engine and orchestrated through the Command Engine:
+1. **Request**: The History Engine resolves the target node to re-apply and requests a `replay` operation from the Command Engine.
+2. **Object Engine Mutation**: The Command Engine applies the forward mutation to the Object Engine using the private `executeReplay` pathway.
+3. **Success Verification**: The Object Engine applies mutations and returns success. If this fails, the transaction is rolled back, the History Engine cursor is not updated, and an error is propagated.
+4. **History Update**: Upon successful mutation, the History Engine updates its cursor/state (moves active pointer). This pathway must not create duplicate history nodes.
+5. **Event Publication**: The History Engine publishes the committed event (e.g., `history:redone`) to the Event Bus.
 
 ---
 
 # 13. Event Publishing
 
-The Command Engine broadcasts events to notify UI, plugins, and services of state transitions:
+The Command Engine and History Engine publish events to the Event Bus to notify UI, plugins, and services of state transitions:
 
+- **Committed Mutation Events**: Published only after successful History Engine recording of a mutation. Examples include `command:executed`, `command:undone`, and `command:redone`.
+- **Event Ordering for Pathways**:
+  - `execute`: Validation -> Object Engine mutation success -> History Engine records node -> Publication of `command:executed` on the Event Bus.
+  - `reverse`: Command Engine executes inverse mutation success -> History Engine updates active pointer -> Publication of `command:undone` (or `history:undone`) on the Event Bus.
+  - `replay`: Command Engine executes forward mutation success -> History Engine updates active pointer -> Publication of `command:redone` (or `history:redone`) on the Event Bus.
+- **Preview / Transient Events**: Represent real-time interactive adjustments (e.g., active pointer drags, live wire routing previews). These are non-canonical, bypass the Command Engine and History Engine stacks entirely, and are explicitly distinguished from committed events (using namespaces like `preview:` or `transient:`).
 - **Command Dispatched**: Broadcast when a command enters the pipeline.
-- **Command Executed**: Broadcast when a command successfully completes state mutation.
-- **Command Failed**: Broadcast if validation fails or an execution exception occurs, containing error details.
-- **Command Undone**: Broadcast when a command's mutations are reverted.
-- **Command Redone**: Broadcast when a command is re-executed via the redo pipeline.
+- **Command Failed**: Broadcast immediately if validation fails or a mutation execution exception occurs, containing error details.
 
 ---
 
 # 14. Undo
 
-- **Mechanism**: The undo operation relies on inverse state representation (reverse deltas or previous state snapshots) recorded during execution.
-- **Target Integrity**: Reverting state must restore objects to their exact historical properties, styles, and positions without affecting unrelated entities.
-- **Topological Integrity**: Undoing structural changes must restore all parent-child hierarchies and associated connections.
+- **Mechanism**: Undo operations are initiated by the History Engine (which manages history navigation intent) by requesting a `reverse` operation through the Command Engine.
+- **Controlled Reversal**: The Command Engine applies the reverse delta mutation on the Object Engine via `executeReverseDelta`. It must not recursively create any new history entries.
+- **State Checkpoints & Cursor Updates**: The History Engine moves its active cursor/pointer only AFTER the Command Engine confirms successful inverse mutation.
+- **Failure Behavior**: If the inverse mutation fails in the Object Engine, the transaction is rolled back, the History Engine active pointer remains unchanged, the failure is propagated, and a `command:failed` event is published.
 
 ---
 
 # 15. Redo
 
-- **Mechanism**: Re-applies the mutation payload stored in the command instance.
-- **Preconditions**: Redo is only valid if the document state has not diverged from the command's expected baseline state.
-- **Execution**: Invokes the same mutation logic as the original execution call, using cached parameters.
+- **Mechanism**: Redo operations are initiated by the History Engine (which manages history navigation intent) by requesting a `replay` operation through the Command Engine.
+- **Controlled Replay**: The Command Engine applies the forward mutation on the Object Engine via `executeReplay`. It must not create duplicate history entries.
+- **State Checkpoints & Cursor Updates**: The History Engine moves its active cursor/pointer only AFTER the Command Engine confirms successful forward mutation.
+- **Failure Behavior**: If the forward mutation fails in the Object Engine, the transaction is rolled back, the History Engine active pointer remains unchanged, the failure is propagated, and a `command:failed` event is published.
 
 ---
 
@@ -254,6 +278,8 @@ Low-level methods reserved for the Core framework:
 - **rollbackTransaction()**: Cancels and discards the active transaction.
 - **injectInterceptors(interceptors)**: Adds validation or logging filters to the execution path.
 - **clearHistory()**: Resets execution logs and history stacks.
+- **executeReverseDelta(command)**: Applies the inverse mutation delta directly to the Object Engine without creating a history node, returning execution success or failure.
+- **executeReplay(command)**: Applies the forward mutation delta directly to the Object Engine without creating a duplicate history node, returning execution success or failure.
 
 ---
 
@@ -282,7 +308,7 @@ Caller           CommandEngine      Validation       ObjectEngine       HistoryE
   |                    |                                  |-- mutate state   |                |
   |                    |<-- state updated ----------------|                  |                |
   |                    |-- record(cmd) ------------------------------------->|                |
-  |                    |-- publish(CommandExecuted) ----------------------------------------->|
+  |                    |-- publish(command:executed) ---------------------------------------->|
   |<-- success --------|                                                                      |
 ```
 
@@ -291,17 +317,17 @@ Caller           CommandEngine      Validation       ObjectEngine       HistoryE
 The sequence diagram below shows the coordination required to revert an executed command:
 
 ```
-Caller             CommandEngine      HistoryEngine      ObjectEngine       EventBus
-  |                      |                  |                 |                |
-  |-- undo() ----------->|                  |                 |                |
-  |                      |-- popUndo() ---->|                 |                |
-  |                      |<-- cmd ----------|                 |                |
-  |                      |-- undo() ------------------------->|                |
-  |                      |                                    |-- revert state |
-  |                      |<-- state reverted -----------------|                |
-  |                      |-- pushRedo(cmd) ->|                 |                |
-  |                      |-- publish(CommandUndone) -------------------------->|
-  |<-- success ----------|                                                     |
+User/UI          HistoryEngine      CommandEngine      ObjectEngine       EventBus
+  |                    |                  |                 |                |
+  |-- undo() --------->|                  |                 |                |
+  |                    |-- reverse(cmd) ->|                 |                |
+  |                    |                  |-- executeReverseDelta(cmd)------>|
+  |                    |                  |                 |-- revert state |
+  |                    |                  |<-- success -----|                |
+  |                    |<-- success ------|                                  |
+  |                    |-- updateCursor() |                                  |
+  |                    |-- publish(command:undone) ------------------------->|
+  |<-- success --------|                                                     |
 ```
 
 ---

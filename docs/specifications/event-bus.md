@@ -132,11 +132,29 @@ Events are classified into the following namespaces to enable efficient filterin
 
 ---
 
-# 10. Event Ordering
+# 10. Event Ordering and Mutation Flow
 
-- **Deterministic Delivery**: Subscribers register with an integer priority value (higher priority executed first).
+To ensure consistency, predictability, and determinism across all subsystems:
+
+- **Deterministic Delivery**: Subscribers register with an integer priority value from 0 to 100 (where a higher numeric value means higher delivery priority).
 - **Execution Order**: Synchronous events are executed immediately in order of priority. Asynchronous events are queued and dispatched sequentially in the order they were published (FIFO).
 - **Replayability**: The exact order of events can be captured in a session log, allowing deterministic simulation replay.
+- **Committed Mutation Ordering**: Canonical committed mutation events are published ONLY after successful History Engine recording.
+- **Pathway Event Sequences**:
+  - **`execute` (Normal mutation)**:
+    1. Pre-execution/validation events (if any)
+    2. Object Engine mutation and validation success
+    3. History Engine records node
+    4. Publication of committed event (e.g., `core:object.created` or `command:executed`) on Event Bus
+  - **`reverse` (Undo)**:
+    1. Command Engine executes inverse mutation on Object Engine (without adding new history node)
+    2. History Engine updates cursor/state (active pointer shifts)
+    3. Publication of undo committed event (e.g., `command:undone` or `history:undone`) on Event Bus
+  - **`replay` (Redo / recovery)**:
+    1. Command Engine executes forward mutation on Object Engine (without duplicate history node)
+    2. History Engine updates cursor/state (active pointer shifts)
+    3. Publication of redo committed event (e.g., `command:redone` or `history:redone`) on Event Bus
+- **Preview / Transient Events**: Non-canonical events representing real-time interactive states (e.g., dragging components, panning viewport) that bypass the Command Engine and History Engine. These are explicitly distinguished from committed events (e.g., using a distinct prefix like `preview:` or `transient:` in the type namespace).
 
 ---
 
@@ -543,7 +561,7 @@ To support technical operations, the Event Bus implements the following delivery
 
 # 29. Event Priorities
 
-Subscribers register with an integer priority value ranging from 0 to 100. The Event Bus schedules execution based on the following classification classes:
+Subscribers register with an integer priority value ranging from 0 to 100. The Event Bus priority model uses exclusively this integer 0-100 scale, where higher numeric values represent higher delivery priority. All contradictory 1-5 priority models are deprecated and removed. The Event Bus schedules execution based on the following classification classes:
 
 | Class Name | Priority Value | Target Subsystems and Description |
 | :--- | :---: | :--- |

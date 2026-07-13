@@ -25,22 +25,23 @@ The History Engine manages the chronological and non-linear history of all docum
 
 The History Engine belongs to the Core Services layer, interacting with:
 
-- **Command Engine**: Submits executed command payloads to the history stacks and coordinates undo/redo triggers.
-- **Object Engine**: Receives rollback mutations during temporal navigation.
-- **Event Bus**: Subscribes to command and project lifecycle events to track progress, and publishes historical state transitions.
-- **Storage Engine**: Serializes history stacks for long-term project files and write-ahead event journals.
+- **Command Engine**: Receives instructions to record executed command nodes, and orchestrates inverse (`reverse`) and forward (`replay`) mutations requested by the History Engine.
+- **Event Bus**: Subscribes to command and project lifecycle events, and publishes historical state transitions.
+- **Storage Engine**: Serializes and deserializes the History Engine's read-only snapshots into `.twh` sidecar files on disk.
+
+The History Engine remains completely decoupled from the Object Engine. It does NOT mutate the Object Engine directly, nor does the Object Engine depend on or reference the History Engine. All historical mutations are routed through the Command Engine.
 
 ```
 +-----------------------------------------------------------------+
-|                        Command Engine                           |
-+-----------------------------------------------------------------+
-       │ (Push executed commands)         ▲ (Trigger undo/redo actions)
-       ▼                                  │
-+-----------------------------------------------------------------+
 |                        History Engine                           |
 +-----------------------------------------------------------------+
-       │ (Apply rollbacks/rollforwards)   ▲ (Listen for triggers)
+       │ (Request reverse/replay)         ▲ (Instruct to record node)
        ▼                                  │
++-----------------------------------------------------------------+
+|                        Command Engine                           |
++-----------------------------------------------------------------+
+       │ (Mutate state / Apply reverse deltas)
+       ▼
 +-----------------------------------------------------------------+
 |                        Object Engine                            |
 +-----------------------------------------------------------------+
@@ -54,7 +55,7 @@ The history of a project is represented as a directed acyclic graph (DAG) of his
 
 - **4.1. History DAG Nodes**: A node contains a unique cryptographic identifier, a reference to the modifying command payload, parent node identifiers, timestamps, and contextual author tags.
 - **4.2. Timeline Edges**: Directed edges connect a parent node to a child node, defining the direction of state mutation progression.
-- **4.3. Active Pointer**: The active node pointer represents the current workspace head. When the active pointer shifts to a node, the Object Engine state is synchronized to match that specific node's state.
+- **4.3. Active Pointer**: The active node pointer represents the current workspace head. When the active pointer shifts to a node, the workspace state is synchronized by requesting the Command Engine to apply the mutations/reversals on the Object Engine.
 - **4.4. Branch Labels**: Human-readable names or machine-generated tags indicating timeline forks.
 
 ---
@@ -124,15 +125,16 @@ The history of a project is represented as a directed acyclic graph (DAG) of his
 
 # 13. Serialization
 
-- **Format**: Serialized history data is stored in JSON, matching the project file format guidelines.
-- **Exclusions**: Volatile runtime variables, execution thread hooks, and UI session state are excluded from the history files.
+- **Read-Only Snapshot Exposure**: The History Engine does not perform file-format serialization. Instead, it exposes a read-only history snapshot (containing the history DAG nodes, active pointer cursor, and branch metadata).
+- **Storage Engine Ownership**: The Storage Engine alone reads this snapshot, translates it into the JSON format for the `.twh` sidecar file, validates it, and performs atomic disk writes.
+- **Exclusions**: Volatile runtime variables, execution thread hooks, and UI session state are excluded from the history snapshot.
 
 ---
 
 # 14. Persistence
 
-- **Auto-Save Sync**: History DAG structures are saved periodically within a `.twh` (TINC Workbench History) sidecar file or embedded in the `.twb` container.
-- **Integrity Check**: File checksums verify serialization boundaries.
+- **Sidecar File (.twh)**: History data is saved strictly in a separate `.twh` (TINC Workbench History) sidecar file rather than being embedded in the `.twb` container, ensuring clean version control histories.
+- **Atomic Operations**: Persistence, verification checks, and atomic writes to `.twh` files are owned and managed entirely by the Storage Engine.
 
 ---
 
@@ -159,7 +161,12 @@ The history of a project is represented as a directed acyclic graph (DAG) of his
 
 # 18. Command Engine Integration
 
-- **Execution Interface**: The Command Engine executes the mutations stored inside a history node.
+- **Mutation Orchestration**: The History Engine has zero access to the Object Engine for mutations and is ignorant of its mutation logic. Instead, the History Engine requests the Command Engine to orchestrate mutations via `reverse` and `replay` calls.
+- **Private Pathways**:
+  - `undo` triggers a `reverse` call to the Command Engine, which runs mutations via the private `executeReverseDelta` pathway.
+  - `redo` (or checkout branch transitions) triggers a `replay` call to the Command Engine, which runs mutations via the private `executeReplay` pathway.
+  - These pathways bypass normal history logging to prevent recursive history node creation.
+- **Cursor Shift Guard**: The History Engine updates its active node pointer/cursor ONLY after the Command Engine returns a validated execution success.
 - **State Validation**: Command Engine checks the active node pointer before starting a transaction to ensure baseline synchronization.
 
 ---
@@ -176,15 +183,19 @@ The history of a project is represented as a directed acyclic graph (DAG) of his
 The public API exposed by the History Engine:
 
 - **20.1. `undo()`**:
-  - Reverts the last command on the current active branch.
+  - Reverts the last command on the current active branch by requesting a `reverse` mutation from the Command Engine.
+  - **Cursor Update**: Shift the active node pointer to the parent node only after successful mutation execution.
+  - **Failure Behavior**: If the Command Engine mutation fails, the pointer remains unmoved, the failure is propagated, and the workspace state is restored.
   - **Parameters**: None.
   - **Returns**: A boolean indicating if the undo operation completed successfully.
-  - **Exceptions**: Throws if the active pointer is already at the project root node.
+  - **Exceptions**: Throws if the active pointer is already at the project root node, or if mutation execution fails.
 - **20.2. `redo()`**:
-  - Re-applies the next command along the active branch path.
+  - Re-applies the next command along the active branch path by requesting a `replay` mutation from the Command Engine.
+  - **Cursor Update**: Shift the active node pointer to the target child node only after successful mutation execution.
+  - **Failure Behavior**: If the Command Engine mutation fails, the pointer remains unmoved, the failure is propagated, and the workspace state is restored.
   - **Parameters**: None.
   - **Returns**: A boolean indicating if the redo operation completed successfully.
-  - **Exceptions**: Throws if there are no forward nodes on the active branch.
+  - **Exceptions**: Throws if there are no forward nodes on the active branch, or if mutation execution fails.
 - **20.3. `canUndo()`**:
   - Checks if there are reversible operations on the current timeline.
   - **Returns**: Boolean.
@@ -217,7 +228,7 @@ Low-level methods reserved for the Core framework:
   - Generates a full state snapshot checkpoint for current memory structures.
   - **Returns**: Checkpoint identifier (string).
 - **21.4. `rollbackToCheckpoint(checkpointId)`**:
-  - Reverts the Object Engine state to a specified checkpoint boundary.
+  - Requests the Command Engine to revert the Object Engine state to a specified checkpoint boundary.
   - **Parameters**:
     - `checkpointId` (string): The identifier of the checkpoint.
 
@@ -257,21 +268,26 @@ ActiveNode       HistoryEngine     CommandEngine      OldBranchNode      NewBran
 
 ## 23.2. Branch Checkout Flow
 
-This diagram demonstrates switching the active node pointer from one branch to another:
+This diagram demonstrates switching the active node pointer from one branch to another, routing all state restorations through the Command Engine:
 
 ```
-Caller           HistoryEngine      ObjectEngine       CommonAncestor     TargetBranch
-  |                    |                  |                  |                  |
-  |-- checkout(B2) --->|                  |                  |                  |
-  |                    |-- findAncestor ->|                  |                  |
-  |                    |<-- ancestor node-|                  |                  |
-  |                    |                                     |                  |
-  |                    |-- rollBackTo(A) ------------------->|                  |
-  |                    |   (Execute undo sequence)           |                  |
-  |                    |                                     |                  |
-  |                    |-- rollForwardTo(B2) ---------------------------------->|
-  |                    |   (Execute redo sequence)           |                  |
-  |<-- success --------|                                     |                  |
+Caller           HistoryEngine      CommandEngine      ObjectEngine
+  |                    |                  |                  |
+  |-- checkout(B2) --->|                  |                  |
+  |                    |-- find LCA       |                  |
+  |                    |                  |                  |
+  |                    |-- reverse(cmd) ->|                  |
+  |                    |   (Undo to LCA)  |-- execute... --->|
+  |                    |                  |<-- success ------|
+  |                    |<-- success ------|                  |
+  |                    |-- updateCursor() |                  |
+  |                    |                  |                  |
+  |                    |-- replay(cmd2) ->|                  |
+  |                    |   (Redo to B2)   |-- execute... --->|
+  |                    |                  |<-- success ------|
+  |                    |<-- success ------|                  |
+  |                    |-- updateCursor() |                  |
+  |<-- success --------|                                     |
 ```
 
 ---
@@ -461,19 +477,21 @@ TimelineUI       HistoryEngine      MemoryCache      StorageEngine        Histor
 This sequence details recovering a transaction that was interrupted during execution:
 
 ```
-RecoveryManager      HistoryEngine      JournalFile       ObjectEngine       Lockfile
-       |                   |                 |                 |                 |
-       |-- bootRecovery() ->|                 |                 |                 |
-       |                   |-- parseWAL() -->|                 |                 |
-       |                   |<-- raw journal -|                 |                 |
-       |                   |                                   |                 |
-       |                   |-- verifyTransaction()             |                 |
-       |                   |   (Identify partial commit)       |                 |
-       |                   |                                   |                 |
-       |                   |-- rollbackPartial() ------------->|                 |
-       |                   |   (Revert uncommitted mutations)  |                 |
-       |                   |                                   |-- remove() ---->|
-       |<-- success -------|                                                     |
+RecoveryManager      HistoryEngine      JournalFile       CommandEngine      ObjectEngine       Lockfile
+       |                   |                 |                  |                 |                 |
+       |-- bootRecovery() ->|                 |                  |                 |                 |
+       |                   |-- parseWAL() -->|                  |                 |                 |
+       |                   |<-- raw journal -|                  |                 |                 |
+       |                   |                                    |                 |                 |
+       |                   |-- verifyTransaction()              |                 |                 |
+       |                   |   (Identify partial commit)        |                 |                 |
+       |                   |                                    |                 |                 |
+       |                   |-- rollbackPartial() -------------->|                 |                 |
+       |                   |   (Request reverse)                |-- execute... -->|                 |
+       |                   |                                    |<-- success -----|                 |
+       |                   |<-- success ------------------------|                 |                 |
+       |                   |                                                      |-- remove() ---->|
+       |<-- success -------|                                                                        |
 ```
 
 ---
