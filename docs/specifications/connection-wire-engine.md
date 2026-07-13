@@ -13,39 +13,43 @@ The Connection and Wire Engine is the core subsystem responsible for path routin
 
 # 2. Connection Semantics
 
-- **Logical Connections**: A valid connection represents an electrical or logical path linking component terminals.
-- **Physical Wires**: Wires translate logical connections into physical layouts on the canvas.
-- **Nets**: Groups of connected wires and terminals that share the same electrical node.
+- **LogicalConnection**: Represents the logical or netlist relationship (not a physical/visual trace). A `LogicalConnection` exclusively owns source and target `Endpoint` objects.
+- **Wire**: Represents the physical segmented routed trace on the canvas. A `Wire` references its semantic relationship using `logicalConnectionId`. Multiple `Wires` may reference a single `LogicalConnection` where valid.
+- **Port and Pin**: Structural sub-components of Semantic Objects (components or ICs) representing terminals and pins.
+- **Nets**: Groups of connected LogicalConnections and Wires that share the same electrical node.
 - **Busses**: Groupings of multiple logical nets represented visually as a single thick line.
 
 ---
 
 # 3. Endpoints
 
-- **Definition**: Endpoints terminate wire segments.
-- **Terminations**: Can link to a component Port, an IC Pin, or a floating coordinate (during routing).
-- **Binding**: Endpoints store references to target port UUIDs to maintain connection integrity during layout shifts.
+- **Exclusive Ownership**: Endpoints are exclusively owned and persisted by `LogicalConnection` objects. `Wire` objects do not own or persist `Endpoint` objects.
+- **Discriminated Union**: An `Endpoint` is a discriminated union of types:
+  - `PORT`: Requires `targetId` (stable reference to a Port ID) and forbids `coordinate`.
+  - `PIN`: Requires `targetId` (stable reference to a Pin ID) and forbids `coordinate`.
+  - `FLOATING`: Requires `coordinate` (arbitrary World Space point representing dangling ends) and forbids `targetId`.
+- **Wire Reference**: A `Wire` is independent of `Endpoint` identity; it simply references its semantic relationship via `logicalConnectionId` and stores the routed path geometries.
 
 ---
 
 # 4. Ports
 
-- **Definition**: Terminals on components (e.g. resistor leads) supporting single-wire connections.
-- **Coordinates**: Resolved relative to the parent component's transform origin.
+- **Definition**: Structural sub-components on components (e.g., resistor terminals).
+- **Coordinates**: Coordinates are resolved dynamically relative to the parent component's transform origin.
 
 ---
 
 # 5. Pins
 
-- **Definition**: Package pins on integrated circuits.
+- **Definition**: Package pins on integrated circuits, representing structural sub-components.
 - **Logical Signal Mapping**: Links physical canvas pins to logical signals in the component model.
 
 ---
 
 # 6. Wires
 
-- **Path Components**: Composed of linear segments connecting endpoints.
-- **Net ID**: Wires are assigned a logical `netId` representing their electrical node.
+- **Path Components**: Composed of linear physical segments with starting and ending coordinate points. Wires do not store or persist `Endpoint` objects directly.
+- **Semantic Link**: A `Wire` references its logical relationship using `logicalConnectionId` (which maps back to a `LogicalConnection` that owns the terminal `Endpoints`).
 
 ---
 
@@ -119,38 +123,37 @@ The Connection and Wire Engine is the core subsystem responsible for path routin
 
 # 17. Reconnecting
 
-- **Reconnection Steps**: Dragging a wire endpoint away from a port disconnects it. Dropping the endpoint onto another port updates the Net ID and component listings.
+- **Reconnection Steps**: Swapping endpoint connections moves the target reference in the LogicalConnection's Endpoint. Dragging a connection away from a Port or Pin updates the Endpoint type to `FLOATING` (dangling). Re-binding the connection to a new Port/Pin updates the Endpoint's `targetId` (and resets its type to `PORT` or `PIN`). All updates to LogicalConnection endpoints and associated Wire geometries are orchestrated through the Command Engine.
 
 ---
 
 # 18. Splitting
 
-- **Segment Splits**: Dropping a component port onto an existing wire segment splits it into two independent wire segments, maintaining the same Net ID.
+- **Segment Splits**: Dropping a component Port or Pin onto an existing Wire segment splits the physical Wire into two independent Wire objects, which continue to reference the same `LogicalConnection` (maintaining the same Net ID).
 
 ---
 
 # 19. Merging
 
-- **Net Merging**: Drawing a wire to connect two independent Nets merges them into a single net. The engine updates the Net IDs of all affected wires.
+- **Net Merging**: Drawing a Wire to connect two independent Nets merges them into a single Net. The engine updates the Net IDs of all affected Wires and LogicalConnections.
 
 ---
 
 # 20. Deletion
 
-- **Segment Deletion**: Deleting a segment splits the net. The engine re-evaluates the remaining paths, splitting the Net into separate Net IDs if components are no longer connected.
+- **Segment Deletion**: Deleting a Wire segment splits the Net. The engine re-evaluates connectivity and splits the Net into separate Net IDs if components are partitioned. Deleting a Port or Pin triggers the Command Engine to convert the associated LogicalConnection Endpoints to `FLOATING` (dangling) and flags referencing Wires as affected.
 
 ---
 
 # 21. Dangling Connections
 
-- **Dangling Wires**: Wires with floating endpoints (not connected to ports) are flagged as dangling.
-- **Design Rule Checks (DRC)**: Generates warnings in the Design Rule Checker during project validation.
+- **Dangling Endpoints**: LogicalConnections with `FLOATING` endpoints (not bound to any Port/Pin) are flagged as dangling. Associated physical Wires referencing these LogicalConnections are marked as affected on the canvas and in the Design Rule Checker (DRC).
 
 ---
 
 # 22. Object Movement
 
-- **Wire Stretching**: Dragging a component stretches its connected wires, triggering path recalculation in real-time to maintain connections.
+- **Wire Stretching**: Dragging a component moves its Ports/Pins. The engine resolves the absolute coordinates of the Ports/Pins and recalculates/stretches referencing Wire segments to maintain physical trace alignment. Preview stretch geometries are transient/non-canonical during the gesture, and are committed only upon drag release.
 
 ---
 
@@ -322,25 +325,25 @@ The Connection and Wire Engine acts as the central coordinator for all electrica
 
 # 38. Connection Lifecycle State Model
 
-Every connection, wire, and net transitions through a unified state model.
-- **DRAFT_PREVIEW**: The transient state during routing. Geometries are computed at 60 FPS in response to mouse movements and snapping targets, bypassing the Object Engine registry and History Engine.
-- **COMMITTED**: The persistent state. The wire has a stable ID, is registered in the Object Engine, is saved to disk, and is recorded on the history stack.
-- **STRETCHED**: An active intermediate state during a dragging gesture (e.g., component movement). The wire paths are dynamically rubber-banded and recalculated in real-time.
-- **DANGLING**: A state where a wire has at least one endpoint not connected to any component Port or Pin. This is structurally valid in the Object Model but flagged as a warning in the Design Rule Checker (DRC).
+Every LogicalConnection, Wire, and Net transitions through a unified state model:
+- **DRAFT_PREVIEW**: The transient/non-canonical state during routing. Preview Wire paths are computed in response to mouse movements and snapping targets, bypassing the Object Engine registry and History Engine.
+- **COMMITTED**: The persistent state. The LogicalConnection and its referencing Wires have stable IDs, are registered in the Object Engine, saved to disk, and recorded on the history stack.
+- **STRETCHED**: An active intermediate state during a dragging gesture (e.g., component movement). The Wire paths are dynamically rubber-banded and recalculated in real-time. They remain transient/non-canonical until the gesture completes and is committed.
+- **DANGLING**: A state where a LogicalConnection has at least one FLOATING endpoint (unbound to any Port or Pin). This is structurally valid in the Object Model but flagged as a warning in the Design Rule Checker (DRC).
 - **SWAPPED / RECONNECTED**: A state representing endpoint re-binding to a new target Port or Pin, triggering netlist updates.
-- **EVICTED**: The terminal state. The wire is removed from the registry, its indexes are cleared, and any remaining net segments are evaluated for partitioning.
+- **EVICTED**: The terminal state. The connection and wires are removed from the registry and their indexes are cleared.
 
 ---
 
 # 39. Endpoint Identity and Reference Guarantees
 
-Endpoints represent the exact termination points of a physical wire segment or logical connection.
+Endpoints represent the exact termination points of a LogicalConnection, owned strictly by the LogicalConnection object:
 - **Endpoint Identity**: Every endpoint must be initialized with a stable, immutable UUIDv4.
-- **Termination Types**:
-  - `PORT_TERMINATION`: Explicitly bound to a port ID or pin ID of a Component.
-  - `JUNCTION_TERMINATION`: Bound to an intersection coordinate of another wire segment in the same Net.
-  - `FLOATING_TERMINATION`: Unbound, terminating at an arbitrary World coordinate (dangling endpoint).
-- **Reference Guarantees**: An endpoint defined with `PORT_TERMINATION` holds a strict, non-nullable reference to the target Port ID. If the parent Component is moved, scaled, or rotated, the Connection Engine resolves the port’s absolute World coordinates relative to the component's transform origin (using Geometry Engine affine transformations) and automatically updates the segment's starting/ending coordinate.
+- **Termination Types**: Follows the discriminated union defined in the Object Model:
+  - `PORT`: Requires `targetId` (non-nullable Port ID) and forbids `coordinate`.
+  - `PIN`: Requires `targetId` (non-nullable Pin ID) and forbids `coordinate`.
+  - `FLOATING`: Requires `coordinate` (non-nullable World coordinate) representing dangling/unbound ends, and forbids `targetId`.
+- **Reference Guarantees**: An endpoint defined with `PORT` or `PIN` holds a strict reference to the target Port/Pin ID. If the parent component is moved, scaled, or rotated, the Connection Engine resolves the port's absolute World coordinates relative to the component's transform origin (using Geometry Engine affine transformations) and automatically updates the referencing Wire segment positions.
 
 ---
 
@@ -349,20 +352,20 @@ Endpoints represent the exact termination points of a physical wire segment or l
 The resolution lifecycle of ports and pins converts local component geometry into absolute World Space coordinates for the routing graph:
 1. **Trigger**: Component transform changes, or route recalculation is initiated.
 2. **Retrieve Component**: Query the Object Engine to retrieve the parent component and its current transform matrix.
-3. **Local coordinate Lookup**: Query the component's definition schema for the local coordinate of the port (e.g., `(x: 0, y: 10)` relative to the component origin).
-4. **Transform Application**: Call `worldToScreen` or affine multiplication from the [Geometry Engine Specification](geometry-engine.md) to apply the component's translation, rotation, and scaling matrices.
+3. **Local coordinate Lookup**: Query the component's definition schema for the local coordinate of the port/pin.
+4. **Transform Application**: Call Geometry Engine affine multiplication to apply the component's translation, rotation, and scaling matrices.
 5. **Caching**: Store the absolute coordinate in the Connection Engine’s endpoint resolution table.
-6. **Logical Mapping**: Map physical pin IDs to logical signals (e.g., Pin 5 maps to signal `SPI_MISO` on an IC package) to prepare for signal compatibility audits.
+6. **Logical Mapping**: Map physical pin IDs to logical signals to prepare for signal compatibility audits.
 
 ---
 
 # 41. Connection Creation Transaction Boundaries
 
-All wire and connection creation actions must operate within transactional boundaries managed by the Command Engine.
-- **Transaction Block**: Drawing a wire from a starting port to a target port initiates a transaction.
+All wire and connection creation actions must operate within transactional boundaries managed by the Command Engine:
+- **Transaction Block**: Drawing a wire from a starting port/pin/coordinate to a target initiates a transaction.
 - **Atomicity**: The transaction wraps:
-  1. Creating the wire object.
-  2. Resolving endpoints and generating unique IDs.
+  1. Creating the LogicalConnection and Wire objects.
+  2. Resolving Endpoints and generating unique IDs.
   3. Routing path segments.
   4. Merging or updating netlist structures.
   5. Running Design Rule Checks (DRC) for signal compatibility.
@@ -373,11 +376,11 @@ All wire and connection creation actions must operate within transactional bound
 # 42. Wire Creation Gesture Lifecycle
 
 The user-interaction gesture sequence for creating a wire is handled cooperatively by the Tool System and the Connection Engine:
-1. **Hover & Highlight**: The user hovers over a component port. The Tool System queries the Connection Engine for compatibility, highlighting the port if a connection is valid.
-2. **Start Click**: User clicks the port. The Connection Engine instantiates a draft session, setting the start endpoint to `PORT_TERMINATION`.
-3. **Dynamic Routing (Preview)**: As the cursor moves, the engine runs A* routing at 60 FPS from the start port to the cursor coordinate (using `FLOATING_TERMINATION`). It renders the path as a preview.
+1. **Hover & Highlight**: The user hovers over a component port/pin. The Tool System queries the Connection Engine for compatibility, highlighting the port if a connection is valid.
+2. **Start Click**: User clicks the port/pin. The Connection Engine instantiates a draft session, setting the start endpoint to PORT or PIN.
+3. **Dynamic Routing (Preview)**: As the cursor moves, the engine runs A* routing from the start port/pin to the cursor coordinate (using a FLOATING endpoint). It renders the path as a preview.
 4. **Vertex Locking (Intermediate Click)**: User clicks on the canvas to lock an intermediate bend. The coordinate is committed as a fixed vertex in the draft session, and path routing resumes from this vertex to the cursor.
-5. **Target Commit Click**: User clicks on a valid target port. The draft session closes, a `CreateWireCommand` is dispatched to the Command Engine, and the wire is committed.
+5. **Target Commit Click**: User clicks on a valid target port/pin. The draft session closes, a `CreateWireCommand` is dispatched to the Command Engine, and the connection and wire are committed.
 6. **Abortion**: Pressing `Escape` or clicking away from valid targets destroys the draft session, clearing the preview canvas.
 
 ---
@@ -409,11 +412,10 @@ A physical wire is stored as an ordered list of coordinate vertices $V_0, V_1, \
 
 # 45. Junction Lifecycle and Ownership
 
-Junctions represent physical connections between intersecting wires sharing the same electrical net.
-- **Junction Dots**: Rendered as a solid dot at coordinate $P$ where 3 or more wire segments intersect.
-- **Junction Endpoint**: When a user draws a wire terminating on an existing wire segment, a junction is formed. A `JUNCTION_TERMINATION` endpoint is created, referencing the target wire ID and the coordinate along the segment.
-- **Dynamic Lifetime**: Junctions are calculated dynamically by the Connection Engine. If segments are edited such that they no longer intersect, the junction is automatically destroyed, and the wire endpoints are updated.
-- **No Standalone Registry**: Junctions are not registered as standalone entities in the Object Engine; they are dynamic geometry properties computed relative to segment endpoints.
+Junctions represent physical connections between intersecting Wires sharing the same electrical net:
+- **Junction Dots**: Rendered as a solid dot at coordinate $P$ where 3 or more Wire segments intersect.
+- **Dynamic Calculation**: Junctions are calculated dynamically by the Connection Engine. If segments are edited such that they no longer intersect, the junction is automatically destroyed.
+- **No Standalone Registry**: Junctions are not registered as standalone entities in the Object Engine, nor do they represent independent persisted Endpoints on LogicalConnections. They are dynamic geometric properties computed from intersecting Wires.
 
 ---
 
@@ -667,35 +669,33 @@ During wire drawing and editing, cursor coordinates are aligned to nearby target
 
 # 68. Connection Deletion and Cascade Boundaries
 
-- **Deletion Command**: Deleting a wire segment or entire net is processed via a `DeleteConnectionCommand`.
+- **Deletion Command**: Deleting a Wire segment or entire Net is processed via a `DeleteConnectionCommand`. A Wire object itself may only be deleted when its routed physical layout path is explicitly removed through canonical mutation. Wires do not own, delete, disconnect, or truncate endpoints.
 - **Cascade Deletion**:
-  - Deleting a Component triggers cascade deletion of all its ports.
-  - Deleting a Port triggers deletion of all connected wire endpoints.
-  - Wires connected to these endpoints are either truncated (reverting to dangling status) or deleted entirely if no connected path segments remain.
-- **Reindexing**: After deletions, a net split check is run, and the netlist is rebuilt.
+  - Deleting a Component triggers cascade deletion of all its Ports and Pins (sub-components).
+  - Deleting a Port or Pin triggers the Command Engine to identify all associated LogicalConnection Endpoints, convert those Endpoints to `FLOATING` through canonical mutation orchestration, and flag Wires referencing those affected LogicalConnections as affected.
+- **Reindexing**: After deletions, a Net split check is run, and the netlist is rebuilt.
 
 ---
 
 # 69. Dangling Endpoint Lifecycle
 
-A dangling endpoint has no binding to a port or junction.
+- **Dangling State Definition**: A dangling state is defined exclusively as an Endpoint of type `FLOATING` owned by a `LogicalConnection` object and unbound to any Port or Pin. There are no junction endpoint semantics in the canonical model.
 - **Permissibility**: Supported by the Object Model to allow incomplete routing layouts.
-- **Visual Indicator**: Rendered with an open square or distinct warning color (configured in styles).
-- **DRC Rules**: The Design Rule Checker flags all dangling wires, generating warnings before project export or netlist compilation.
-- **Interaction**: Users can select, drag, and snap dangling endpoints to ports to commit and resolve them.
+- **Visual Indicator**: Rendered with an open square or distinct warning color (configured in styles) on the canvas to represent the affected Wire segment.
+- **DRC Rules**: The Design Rule Checker (DRC) flags dangling LogicalConnections or FLOATING LogicalConnection Endpoints. Wires themselves do not own the dangling state.
+- **Interaction**: Users can select, drag, and snap FLOATING LogicalConnection Endpoints to Ports or Pins to commit and resolve them.
 
 ---
 
 # 70. Reconnection and Endpoint Swapping
 
-- **Action**: Dragging an active endpoint from Port A and dropping it onto Port B.
+- **Action**: Dragging an active connection from Port A and dropping it onto Port B.
 - **Execution steps**:
-  1. Disconnect the endpoint from Port A.
-  2. Perform a net partition sweep on Port A's old net (Net A). Split the net if disconnected.
-  3. Attach the endpoint to Port B.
-  4. Merge the wire and its segments into Port B's net (Net B).
-  5. Run pathfinding to adjust the segment geometries to Port B's coordinate.
-  6. Commit transaction and publish updates.
+  1. The Command Engine updates the LogicalConnection's Endpoint type/target, disconnecting it from Port A and setting it to Port B.
+  2. Perform a net partition sweep on Port A's old Net (Net A). Split the net if disconnected.
+  3. Associate the updated Endpoint with Port B's Net (Net B).
+  4. Run pathfinding to adjust the segment geometries of the referencing Wires to Port B's coordinate.
+  5. Commit transaction and publish updates.
 
 ---
 
@@ -790,7 +790,7 @@ The table below lists recovery protocols for common Connection and Wire Engine f
 | **Pathfinding Timeout** | UI freeze risk | Execution timer exceeds 50ms | Abort search, fall back to straight line, raise warning. |
 | **Duplicate Net ID** | Shorts in netlist | Integrity check on registration | Re-generate unique Net ID, run partition check to heal. |
 | **Incompatible Signals** | Electrical damage | Signal compatibility audit | Block commit in strict mode; flag DRC warning in relaxed mode. |
-| **Dangling Reference** | Orphan wire segment | Orphan audit on registry updates | Remove invalid endpoint port reference, convert to floating. |
+| **Dangling Reference** | Orphan LogicalConnection Endpoint | Orphan audit on registry updates | Convert the affected Endpoint in LogicalConnection to FLOATING through Command Engine orchestration and flag referencing Wires as affected. |
 | **Zero-Length Segment** | Routing loop/crash | Degenerate check after move | Discard segment, collapse vertices, merge adjacent nodes. |
 
 ---
@@ -852,7 +852,7 @@ CommandEngine      ConnectionEngine     ObjectEngine       EventBus       Render
 
 ## 82.3. Reconnection Swap Sequence
 
-This diagram shows the sequence when swapping wire endpoints:
+This diagram shows the sequence when swapping LogicalConnection endpoints:
 
 ```
 ToolSystem       ConnectionEngine      ObjectEngine       GeometryEngine       EventBus
@@ -863,8 +863,9 @@ ToolSystem       ConnectionEngine      ObjectEngine       GeometryEngine       E
     |                   |                   |<-- coords -------|                   |
     |                   |                                                          |
     |-- dropOnPort(P2) -|                                                          |
-    |                   |-- disconnect(P1) ->|                                     |
-    |                   |-- connect(P2) ---->|                                     |
+    |                   |-- updateEndpoint(P2)                                     |
+    |                   |   (LogicalConnection Endpoint updated)                   |
+    |                   |------------------->|                                     |
     |                   |-- runBFS()         |                                     |
     |                   |   (Split/Merge)    |                                     |
     |                   |-- updatePaths() ────────────────────>|                   |
@@ -969,32 +970,40 @@ Visualizes a routing session in progress, prior to transaction commit:
 
 ## 84.2. Committed Connection Structure Payload (`core:committed-connection`)
 
-The serialized output of a fully routed, valid wire committed to the Object Engine:
+The serialized output of a fully routed, valid LogicalConnection and its referencing Wire committed to the Object Engine:
 
 ```json
 {
-  "id": "wire-501",
-  "type": "wire",
-  "version": 1,
-  "netId": "net-8a2b3c4d",
-  "endpoints": [
-    { "id": "ep-1", "type": "PORT_TERMINATION", "targetId": "resistor-102:p2" },
-    { "id": "ep-2", "type": "PORT_TERMINATION", "targetId": "capacitor-204:p1" }
-  ],
-  "vertices": [
-    { "x": 80.0000, "y": 85.0000 },
-    { "x": 120.0000, "y": 85.0000 },
-    { "x": 120.0000, "y": 120.0000 },
-    { "x": 150.0000, "y": 120.0000 }
-  ],
-  "style": {
-    "color": "#00aa00",
-    "thickness": 1.5000,
-    "lineStyle": "solid"
+  "connection": {
+    "id": "logical-conn-501",
+    "type": "logicalConnection",
+    "version": 1,
+    "netId": "net-8a2b3c4d",
+    "endpoints": [
+      { "id": "ep-1", "type": "PORT", "targetId": "resistor-102:p2" },
+      { "id": "ep-2", "type": "PORT", "targetId": "capacitor-204:p1" }
+    ]
   },
-  "metadata": {
-    "impedance": "50ohm",
-    "maxCurrent": "1.0A"
+  "wire": {
+    "id": "wire-501",
+    "type": "wire",
+    "version": 1,
+    "logicalConnectionId": "logical-conn-501",
+    "vertices": [
+      { "x": 80.0000, "y": 85.0000 },
+      { "x": 120.0000, "y": 85.0000 },
+      { "x": 120.0000, "y": 120.0000 },
+      { "x": 150.0000, "y": 120.0000 }
+    ],
+    "style": {
+      "color": "#00aa00",
+      "thickness": 1.5000,
+      "lineStyle": "solid"
+    },
+    "metadata": {
+      "impedance": "50ohm",
+      "maxCurrent": "1.0A"
+    }
   }
 }
 ```
@@ -1010,6 +1019,7 @@ The command payload used by the Command Engine to execute a net merge:
   "parameters": {
     "dominantNetId": "net-8a2b3c4d",
     "subordinateNetId": "net-f9e8d7c6",
+    "affectedConnections": ["logical-conn-501", "logical-conn-803"],
     "affectedWires": ["wire-501", "wire-803"],
     "affectedPorts": [
       "resistor-102:p2",
@@ -1018,7 +1028,7 @@ The command payload used by the Command Engine to execute a net merge:
     ],
     "reverseDelta": {
       "originalNetMap": {
-        "wire-803": "net-f9e8d7c6",
+        "logical-conn-803": "net-f9e8d7c6",
         "ic-301:pin-12": "net-f9e8d7c6"
       }
     }
@@ -1026,16 +1036,16 @@ The command payload used by the Command Engine to execute a net merge:
 }
 ```
 
-## 84.4. Dangling Wire DRC Record (`core:dangling-wire-drc`)
+## 84.4. Dangling Connection DRC Record (`core:dangling-connection-drc`)
 
-The record generated by the Design Rule Checker when routing is left incomplete:
+The record generated by the Design Rule Checker when a LogicalConnection is left incomplete:
 
 ```json
 {
-  "ruleId": "DRC_WARN_DANGLING_WIRE",
+  "ruleId": "DRC_WARN_DANGLING_CONNECTION",
   "severity": "warning",
-  "targetId": "wire-909",
-  "message": "Wire 'wire-909' has a floating endpoint at coordinate (210.0000, 340.0000).",
+  "targetId": "logical-conn-909",
+  "message": "LogicalConnection 'logical-conn-909' has a floating endpoint at coordinate (210.0000, 340.0000).",
   "context": {
     "netId": "net-3f5e7d8a",
     "floatingEndpointId": "ep-909b",
@@ -1051,6 +1061,7 @@ The delta description passed to the Event Bus and History Engine during endpoint
 ```json
 {
   "commandId": "cmd-recon-3342",
+  "logicalConnectionId": "logical-conn-501",
   "wireId": "wire-501",
   "endpointId": "ep-2",
   "disconnection": {

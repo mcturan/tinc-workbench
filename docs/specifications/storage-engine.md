@@ -7,7 +7,7 @@
 
 # 1. Purpose
 
-The Storage Engine is the core subsystem responsible for document persistence, project packaging, asset serialization, and crash recovery within TINC Workbench. It converts runtime in-memory structures from the Object Engine and History Engine into durable disk representations (specifically the `.twb` single-file UTF-8 JSON document for Version 1), coordinating local-first session durability.
+The Storage Engine is the core subsystem responsible for document persistence, project packaging, asset serialization, and crash recovery within TINC Workbench. It converts runtime in-memory snapshots from the Object Engine, History Engine, and Page-State Adapter into durable disk representations—specifically the `.twb` single-file UTF-8 JSON document for canonical active project state, and a separate `.twh` history sidecar file for recoverable timeline states.
 
 ---
 
@@ -22,11 +22,12 @@ The Storage Engine is the core subsystem responsible for document persistence, p
 
 # 3. Responsibilities
 
-- Serializing project models, history sequences, and asset references into a single UTF-8 encoded JSON document (.twb) for Version 1.
+- Serializing canonical active project models and asset references into a single UTF-8 encoded JSON document (`.twb`) for Version 1.
+- Serializing the recoverable history DAG, cursor, branches, and snapshot state into a separate history sidecar document (`.twh`).
 - Executing atomic writes using temporary files (`.tmp`) and file rename operations to prevent file corruption.
 - Managing background autosaves and event journaling (`.twej` files).
 - Recovering files using the Write-Ahead Log (WAL) journal after unclean shutdowns.
-- Validating project models against JSON schema definitions and executing migration scripts.
+- Validating project models and history schemas against JSON schema definitions and executing migration scripts.
 - Preserving unknown plugin data properties during file reads and writes.
 
 ---
@@ -37,7 +38,9 @@ The Storage Engine does NOT:
 
 - Manage active editing states, selection pointers, or layout parameters (Canvas/Selection Engine domain).
 - Process user command logs or run transaction undo/redo stacks (Command/History Engine domain).
-- Handle network synchronizations or remote cloud multi-user merges directly (Collaboration Service domain).
+- Handle network synchronizations or remote cloud multi-user merges directly.
+- Query the Canvas Engine directly for runtime viewport or zoom parameters. Any persisted viewport or layout states are retrieved exclusively via the Page-State Adapter / Application Orchestrator.
+- Allow the Object Engine to serialize JSON or TWB, or the History Engine to serialize TWH; the Storage Engine alone owns all serialization, deserialization, format validation, and atomic disk writes.
 
 ---
 
@@ -45,8 +48,8 @@ The Storage Engine does NOT:
 
 Positioned as the core persistence agent:
 
-- **Upstream Channels**: Interacts with the Command Engine and History Engine during transaction commits or save events.
-- **Data Source**: Serializes the Object Engine's component tree.
+- **Upstream Channels**: Interacts with the Command Engine during transaction commits or save events.
+- **Data Source**: Retrieves read-only snapshots from the Object Engine and History Engine, and viewport states from the Page-State Adapter.
 - **File System Interface**: Directly invokes OS-level file I/O operations (or browser-level File System Access APIs when running in web builds).
 
 ```
@@ -58,15 +61,18 @@ Positioned as the core persistence agent:
 +-----------------------------------------------------------------+
 |                       Storage Engine                            |
 +-----------------------------------------------------------------+
-       │                                  ▲
-       │ (Read active state model)        │ (Read/Write JSON block)
-       ▼                                  │
-+------------------------------------+    │
-|         Object Engine              |    │
-+------------------------------------+    │
+       │ (Retrieve read-only snapshots)   ▲ (Read/Write JSON blocks)
+       ├─────────────────┬────────────────┤
+       ▼                 ▼                ▼
++--------------+  +--------------+  +--------------------+
+| ObjectEngine |  |HistoryEngine |  | Page-State Adapter |
+| (Read-Only)  |  | (Read-Only)  |  |   (Viewport State) |
++--------------+  +--------------+  +--------------------+
+                                          │
                                           ▼
 +-----------------------------------------------------------------+
 |                       Physical Storage / OS File System         |
+|                (Active: .twb  |  History Sidecar: .twh)         |
 +-----------------------------------------------------------------+
 ```
 
@@ -74,23 +80,34 @@ Positioned as the core persistence agent:
 
 # 6. Project Loading
 
-Project load operations execute the following steps:
+Project load operations are coordinated sequentially to guarantee that failure of the supplementary history sidecar (.twh) does not prevent opening a valid active project state (.twb):
 
 1. **Lock Verification**: Checks for existing `.lock` markers to verify file ownership.
-2. **File Reading**: Reads the single `.twb` UTF-8 text file into an in-memory buffer.
-3. **Parse & Validate**: Deserializes the JSON payload and runs structural schema checks.
+2. **TWB Load**: Reads the canonical active project state `.twb` file.
+   - If the `.twb` file is missing, the load operation fails entirely.
+   - If the `.twb` file is present but corrupt, the load operation halts, and the user is prompted to restore from the latest backup candidate.
+3. **TWB Validation**: Deserializes the `.twb` payload and runs schema checks.
 4. **Migration Sweep**: Checks schema versions and runs migration translators if necessary.
-5. **Populate Models**: Instantiates components inside the Object Engine and restores the History Engine's timeline logs.
+5. **Hydrate Active State**: Hydrates component and netlist registries in the Object Engine.
+6. **TWH Load (Supplementary)**: Checks for the existence of the `.twh` history sidecar.
+   - **TWH Missing**: If `.twh` is missing, the project loads successfully. The History Engine is initialized with a fresh timeline starting at the current `.twb` active state.
+   - **TWH Present**: The Storage Engine reads and validates the history DAG, cursor, and branch metadata.
+     - **Validation Success**: Re-populates the History Engine timeline logs.
+     - **Validation/Compat Failure (Corrupt TWH or mismatch)**: If the `.twh` is corrupt, or if its final revision hash does not match the active state in `.twb` (mismatched project revision), the history is discarded or quarantined. The project loads successfully, and the History Engine is initialized with a fresh timeline starting at the current `.twb` active state.
 
 ---
 
 # 7. Project Saving
 
-Project save operations execute the following steps:
+Project save operations execute in a strict transaction order to prevent writing incomplete states:
 
-1. **State Serialization**: Converts current Object Engine and History Engine parameters to a formatted JSON string.
-2. **Atomic Overwrite**: Writes the JSON data to a temporary file (`.tmp`) first, then renames it to overwrite the target `.twb` file.
-3. **Clean Up**: Flushes OS disk buffers and clears temporary markers.
+1. **Snapshot Collection**: The Storage Engine retrieves a read-only canonical project-state snapshot from the Object Engine, a read-only history snapshot from the History Engine, and runtime page/viewport settings from the Page-State Adapter.
+2. **Active State Serialization**: Serializes the active project properties into the Version 1 single-document UTF-8 JSON format.
+3. **Atomic TWB Write**: Writes the serialized active state to `[filename].twb.tmp` first, then renames it to overwrite the target `.twb` file.
+4. **TWH Serialization**: Serializes history DAG nodes, active cursor, branch metadata, and checkpoints.
+5. **Atomic TWH Write**: Only after the `.twb` write succeeds, the Storage Engine writes the history serialization to `[filename].twh.tmp` and renames it to overwrite the target `.twh` file.
+   - **TWH Save Failure**: If writing the `.twh` file fails (e.g. disk quota exceeded during history write), the transaction is still treated as committed since the canonical active `.twb` state was successfully persisted. The engine logs a history save warning and proceeds.
+6. **Clean Up**: Flushes OS disk buffers and clears temporary markers.
 
 ---
 
@@ -102,11 +119,12 @@ The `.twb` container matches the structural rules defined in the Project File Fo
 - Contains the following root keys:
   - `schemaVersion`: SemVer definition.
   - `project`: Base project metadata (id, name, description).
-  - `pages`: Active document pages, layers, and objects.
+  - `pages`: Active document pages, layers, and objects (including page viewport states).
   - `assets`: Base64 encoded or referenced binary files.
   - `plugins`: Scoped settings reserved for active plugins.
   - `settings`: Grid, snap, and theme parameters.
   - `metadata`: Free-form audit trails.
+- History records must not be stored in the TWB file; they reside exclusively in the TWH sidecar.
 
 ---
 
@@ -114,8 +132,9 @@ The `.twb` container matches the structural rules defined in the Project File Fo
 
 Defines which properties are persisted and which are excluded:
 
-- **Persisted**: Object geometry boundaries, parameter definitions, layer configurations, connection paths, styles, history nodes, metadata.
-- **Excluded**: Viewport matrices, active selection outlines, layout handles, local plugin memory registers, undo/redo transaction buffers.
+- **TWB (Canonical Active State)**: Component registries, netlists (LogicalConnections and Wires), layers, properties, assets, settings (including page viewports via Page-State Adapter).
+- **TWH (Recoverable History)**: History DAG nodes, branch metadata, active cursor pointers.
+- **Excluded**: Active canvas selection outlines, transient tool gestures, and renderer GPU allocations.
 
 ---
 
@@ -217,7 +236,7 @@ When reading a project file containing plugin fields from uninstalled plugins, t
 
 # 26. Command History Persistence
 
-Serializes history trails inside the `history.json` sidecar or embedded metadata to support undo/redo across editing sessions.
+Serializes the command history DAG, active pointer cursor, branches, and checkpoint snapshots inside the supplementary `.twh` history sidecar file to support undo/redo across editing sessions.
 
 ---
 
@@ -307,25 +326,35 @@ Employs fallback strategies (e.g., loading the last known backup file on checksu
 
 # 41. Command Engine Integration
 
-Coordinates commits with the Command Engine.
+- The Storage Engine coordinates with the Command Engine to ensure serialization triggers do not interrupt active transaction commits.
+- It exposes validation APIs allowing the Command Engine to check project format compliance.
 
 ---
 
 # 42. History Engine Integration
 
-Stores historical DAG sequences.
+- The Storage Engine alone owns history serialization and deserialization. The History Engine exposes a read-only history snapshot to the Storage Engine.
+- The History Engine does not perform file I/O or serialize `.twh` files directly.
 
 ---
 
 # 43. Event Bus Integration
 
-Listens to save triggers and publishes status events (`storage:save-completed`).
+- Listens to save triggers and publishes status events (`storage:save-completed`).
 
 ---
 
 # 44. Object Engine Integration
 
-Retrieves active document state properties.
+- The Storage Engine retrieves a read-only canonical project-state snapshot from the Object Engine for serialization.
+- The Object Engine does not write files or serialize JSON directly. It remains ignorant of file persistence structures.
+
+---
+
+# 44a. Page-State Adapter / Application Orchestrator Integration
+
+- Viewport configurations and active page state layouts are obtained from the Page-State Adapter / Application Orchestrator for persistence.
+- The Storage Engine does not query the Canvas Engine directly.
 
 ---
 
@@ -769,6 +798,11 @@ The table below outlines the recovery protocols for common storage failures:
 | **Lock File Exists** | Read/write blocked | Detect `[filename].lock` on open | Verify lock age. If active, block opening; if stale, prompt user to override. |
 | **Permission Denied** | File access blocked | Catch `EACCES` or `EPERM` | Halt operation, alert user, write autosave to fallback folder. |
 | **Corrupted JSON** | Parse fails | Catch syntax error during parsing | Halt load, alert user, present candidate list for backup recovery. |
+| **TWB Succeeds, TWH Fails** | History is not saved | Catch exception during `.twh` write | Save is committed. Log warning for history serialization failure, keep `.twb` intact. |
+| **TWH Exists, TWB Missing** | Project unreadable | Check file presence on load | Abort load, throw error (active state is canonical and required). |
+| **TWB Exists, TWH Missing** | History timeline lost | Check file presence on load | Load active `.twb` state successfully, initialize fresh History timeline from current state. |
+| **TWH Revision Mismatch** | History is incompatible | Compare revision hashes on load | Load active `.twb` state successfully, discard/quarantine incompatible `.twh` file, reset History timeline. |
+| **Corrupt TWH, Valid TWB** | History is unreadable | Catch parse errors for `.twh` file | Load active `.twb` state successfully, ignore/quarantine corrupt `.twh` file, reset History timeline. |
 
 ---
 
