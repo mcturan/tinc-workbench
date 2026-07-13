@@ -7,18 +7,21 @@
 
 # 1. Purpose
 
-The Tool System is the core subsystem responsible for managing active interaction modes (tools) within the TINC Workbench canvas. It intercepts raw mouse, touch, and keyboard events from the Canvas Engine and translates them into structured actions (selection updates, object movements, wire routing paths, or shape placements) by delegating to target engines (Selection, Geometry, Command).
+The Tool System is the core subsystem responsible for managing active interaction modes (tools) within the TINC Workbench canvas. It consumes normalized input events from the UI Framework Input Router and translates them into structured gestures and actions by delegating to target engines (Selection, Geometry, Canvas, Command). It never receives raw DOM events from the Canvas Engine.
 
 ---
 
 # 2. Responsibilities
 
 - Tracking the active tool state (e.g., Select Tool, Wire Routing Tool, Component Creation Tool).
-- Routing user pointer gestures and keyboard events to the active tool instance.
+- Routing normalized pointer, keyboard, touch, and wheel input to the active tool instance.
+- Owning active tool arbitration and gesture lifecycle.
+- Requesting pointer capture through the UI Framework Input Router DOM boundary.
 - Rendering dynamic drawing helpers (overlays, guidelines, snapping indicators).
 - Syncing mouse cursor styles to reflect active tool modes.
 - Mediating temporary switches (e.g., holding Spacebar temporarily switches to Pan Tool, releasing reverts to Select Tool).
-- Coordinating with the Selection Engine and Geometry Engine during interaction sweeps.
+- Coordinating with the Selection Engine, Geometry Engine, and Canvas Engine coordinate services during interaction sweeps.
+- Managing preview lifecycle and cancellation semantics.
 
 ---
 
@@ -42,10 +45,24 @@ The lifecycle of interaction tools:
 
 # 5. Input Routing
 
-The Canvas Engine intercepts raw events (mousedown, mousemove, mouseup, keydown, keyup) and routes them directly to the Tool System:
+The UI Framework Input Router owns raw DOM event intake and routes normalized input events to the Tool System.
 
-- Coordinates are converted to World Space using the Geometry Engine before passing to the tool.
-- The active tool intercepts these coordinates via `onMouseDown()`, `onMouseMove()`, `onMouseUp()`, `onKeyDown()`, and `onKeyUp()`.
+Normalized input events conceptually contain:
+
+- event kind (pointer, keyboard, touch, wheel)
+- phase (start, move, end, cancel)
+- screen coordinate when applicable
+- modifier state
+- active pointer identifier when applicable
+- target canvas/page identifier when applicable
+
+Rules:
+
+- The Canvas Engine must not route input events to the Tool System.
+- The Tool System may query the Canvas Engine for coordinate conversion and runtime viewport services.
+- The Tool System owns gesture interpretation after normalized input is received.
+- The Tool System dispatches canonical mutations only through the Command Engine.
+- Preview state remains transient and non-canonical until a gesture is committed through the Command Engine.
 
 ---
 
@@ -59,14 +76,14 @@ The Canvas Engine intercepts raw events (mousedown, mousemove, mouseup, keydown,
 # 7. Creation Tools
 
 - **Component Creation Tool**: Displays a semi-transparent visual preview of the component under the cursor.
-- Clicking the canvas places the object in the Object Engine by executing `CreateObjectCommand`.
+- Clicking the canvas creates a transient preview; committing the gesture dispatches `CreateObjectCommand` through the Command Engine.
 
 ---
 
 # 8. Transform Tools
 
 - **Transform Tool**: Handles scaling, moving, and rotating objects using selection handles.
-- Calculates translation vectors via the Geometry Engine during mouse dragging.
+- Calculates translation vectors via the Geometry Engine during normalized pointer drag gestures.
 
 ---
 
@@ -118,6 +135,7 @@ The Canvas Engine intercepts raw events (mousedown, mousemove, mouseup, keydown,
 # 16. Command Integration
 
 - Dispatches commands (Move, Scale, Create, Route) to the Command Engine on gesture completion.
+- Does not directly mutate Object Engine, History Engine, Storage Engine, or canonical project state.
 
 ---
 
@@ -129,7 +147,12 @@ The Canvas Engine intercepts raw events (mousedown, mousemove, mouseup, keydown,
 
 # 18. Canvas Integration
 
-- Coordinates redraw flags and canvas pointer captures.
+- Queries Canvas Engine coordinate conversion and viewport services.
+- Requests viewport navigation operations through Canvas Engine runtime APIs when the active tool requires pan or zoom behavior.
+- Coordinates preview invalidation requests with rendering services.
+- Pointer capture is requested by the Tool System and performed through the UI Framework Input Router DOM boundary.
+- Does not receive raw DOM input from Canvas Engine.
+- Does not require Canvas Engine to import or call Tool System APIs.
 
 ---
 
@@ -188,7 +211,9 @@ The API exposed by the Tool System:
 - **registerTool(toolInstance)**: Adds a custom tool definition to the active registry.
 - **activateTool(toolId, options)**: Swaps active canvas tools.
 - **getActiveTool()**: Returns details for the active tool.
-- **routeInputEvent(event)**: Low-level dispatcher passing event inputs to the active tool.
+- **routeInputEvent(event)**: Low-level dispatcher passing normalized input events from the UI Framework Input Router to the active tool.
+- **requestPointerCapture(request)**: Requests DOM pointer capture through the UI Framework Input Router boundary.
+- **releasePointerCapture(captureId)**: Requests release of pointer capture through the UI Framework Input Router boundary.
 
 ---
 
@@ -205,19 +230,16 @@ The API exposed by the Tool System:
 The diagram below details orthogonal wire segment generation during dragging:
 
 ```
-CanvasEngine         ToolSystem          GeometryEngine       ObjectEngine       RenderingEngine
-     |                   |                     |                   |                    |
-     |-- dragPointer() ->|                     |                   |                    |
-     |                   |-- screenToWorld() ->|                   |                    |
-     |                   |<-- worldCoord ------|                   |                    |
-     |                   |                                         |                    |
-     |                   |-- querySnap() ---->|                    |                    |
-     |                   |<-- snapPoint -------|                    |                    |
-     |                   |                                                              |
+InputRouter          ToolSystem          CanvasEngine       GeometryEngine       RenderingEngine       CommandEngine
+     |                   |                    |                   |                    |                   |
+     |-- normalizedDrag ->|                   |                   |                    |                   |
+     |                   |-- screenToWorld() >|                   |                    |                   |
+     |                   |<-- worldCoord -----|                   |                    |                   |
+     |                   |-- querySnap() ------------------------>|                    |                   |
+     |                   |<-- snapPoint --------------------------|                    |                   |
      |                   |-- updateWirePreview() -------------------------------------->|
-     |                   |   (Redraw dynamic segments)                                  |
-     |-- releaseMouse() >|                                                              |
-     |                   |-- createWire() ------------------------>|                    |
+     |-- normalizedEnd -->|                                                              |
+     |                   |-- dispatchCreateWire() ----------------------------------------------------->|
 ```
 
 ## 28.2. Spring-Loaded Pan Tool Switch Sequence
@@ -225,17 +247,17 @@ CanvasEngine         ToolSystem          GeometryEngine       ObjectEngine      
 This diagram shows toggling temporary pan tools using keyboard inputs:
 
 ```
-Keyboard          CanvasEngine         ToolSystem          CanvasViewport
+Keyboard          InputRouter         ToolSystem          CanvasEngine
    |                   |                    |                     |
    |-- Spacebar Down ->|                    |                     |
    |                   |-- keyPress() ----->|                     |
-   |                    |-- tempSwitch(Pan)   |
-   |                    |-- setCursor(grab) ->|
+   |                   |                    |-- tempSwitch(Pan)   |
+   |                   |                    |-- requestPanCursor()|
    |                                                              |
    |-- Spacebar Up --->|                                          |
    |                   |-- keyRelease() --->|                     |
    |                   |                    |-- restoreTool()     |
-   |                   |                    |-- setCursor(default)|
+   |                   |                    |-- requestCursor() ->|
 ```
 
 ---
@@ -303,23 +325,24 @@ The active tool selection state machine:
 
 # 35. Pointer Capture Lifecycle
 
-- **35.1. Capture Lock**: When dragging starts, the system locks pointer events to the canvas viewport.
-- **35.2. Release**: Capture is released on pointer release or gesture cancellation.
+- **35.1. Capture Request**: When dragging starts, the Tool System requests pointer capture from the UI Framework Input Router.
+- **35.2. Capture Execution**: The UI Framework Input Router performs DOM pointer capture and continues delivering normalized input to the Tool System.
+- **35.3. Release**: The Tool System requests capture release on pointer release or gesture cancellation; the UI Framework Input Router releases the DOM capture.
 
 ---
 
 # 36. Multi-Pointer and Touch Input Boundaries
 
-- **36.1. Touch Routing**: Touch gestures are routed dynamically:
-  - Multi-touch inputs (e.g., pinch-to-zoom) are sent to the Canvas Engine.
-  - Single-finger drags are routed as standard pointer actions.
+- **36.1. Touch Routing**: Touch gestures are normalized by the UI Framework Input Router:
+  - Multi-touch navigation requests may be interpreted as Canvas viewport operations.
+  - Single-finger drags are routed to the active tool as normalized pointer actions.
 
 ---
 
 # 37. Keyboard Event Routing
 
-- **37.1. Keyboard Routing**: Active tools intercept keyboard events first (e.g., arrow keys move objects when Select tool is active).
-- **37.2. Fallback**: Unhandled keys fall back to global shortcuts or text inputs.
+- **37.1. Keyboard Routing**: Active tools receive normalized keyboard input only after UI Framework routing precedence permits tool handling.
+- **37.2. Fallback**: Unhandled normalized tool keys return to the UI Framework Input Router for global shortcut or focused-control handling.
 
 ---
 
@@ -345,22 +368,22 @@ Modifier keys modify tool behaviors based on precedence:
 # 40. Tool Transaction Boundaries
 
 - **40.1. Transaction Boundaries**: Tool interactions define command transaction scopes:
-  - `Mousedown`: Opens a transaction in the Command Engine.
-  - `Drag`: Dispatches temporary delta updates.
-  - `Mouseup`: Commits the transaction.
+  - Normalized pointer start: Opens gesture state.
+  - Normalized pointer move: Updates transient preview state.
+  - Normalized pointer end: Dispatches the final command through the Command Engine.
 
 ---
 
 # 41. Preview State versus Committed State
 
-- **41.1. Preview State**: Component layouts and wire routes are drawn as semi-transparent previews.
-- **41.2. Committed State**: Upon click release, the preview is saved as a standard Object Model entry.
+- **41.1. Preview State**: Component layouts and wire routes are drawn as semi-transparent previews and remain non-canonical.
+- **41.2. Committed State**: Upon gesture commit, the Tool System dispatches a command to the Command Engine. Only Command Engine success creates canonical project state.
 
 ---
 
 # 42. Command Dispatch Rules
 
-- **42.1. Dispatch Trigger**: Commands are sent to the Command Engine on gesture completion (e.g., mouse release).
+- **42.1. Dispatch Trigger**: Commands are sent to the Command Engine on normalized gesture completion.
 - **42.2. Error Rollback**: If a command fails during execution, the tool rolls back its preview state and alerts the user.
 
 ---
@@ -536,7 +559,7 @@ The table below outlines recovery protocols for common tool failures:
 | Failure Mode | System Impact | Detection Mechanism | Recovery Procedure |
 | :--- | :--- | :--- | :--- |
 | **Plugin Tool Crash** | Drawing gesture locks | Catch handler exception | Cancel active gesture, revert to Select Tool, blacklist plugin tool. |
-| **Pointer Capture Loss** | Mouseup event missed | Listen to window focus loss | Cancel active gesture, rollback transaction, reset cursor. |
+| **Pointer Capture Loss** | Normalized pointer end missed | Input Router detects window focus loss | Cancel active gesture, rollback transaction, reset cursor. |
 | **Out-of-Bounds Drag** | Coordinates overflow | Check coordinate bounds | Clamp pointer coordinates to workspace boundaries. |
 | **Snap Index Mismatch** | Snapping highlights freeze | Detect invalid snap coordinates | Rebuild spatial index and reset snapping targets. |
 
@@ -563,7 +586,7 @@ The table below outlines recovery protocols for common tool failures:
 This diagram shows how pressing Escape cancels active drag transactions:
 
 ```
-Keyboard          CanvasEngine         ToolSystem         CommandEngine       ObjectEngine
+Keyboard          InputRouter         ToolSystem         CommandEngine       ObjectEngine
    |                   |                    |                   |                  |
    |-- Escape press -->|                    |                   |                  |
    |-- keyPress() ----->|                    |                   |                  |
@@ -579,7 +602,7 @@ Keyboard          CanvasEngine         ToolSystem         CommandEngine       Ob
 This diagram shows nesting temporary tools in the stack:
 
 ```
-Keyboard          CanvasEngine         ToolSystem         OverlayManager      CanvasBackend
+Keyboard          InputRouter         ToolSystem         OverlayManager      CanvasBackend
    |                   |                    |                   |                  |
    |-- Spacebar Down ->|                    |                   |                  |
    |-- keyPress() ----->|                    |                   |                  |
@@ -600,7 +623,7 @@ This sequence details handling custom tool crashes:
 ```
 ToolSystem        PluginSandbox       PluginSDK         SystemLogger       CanvasViewport
     |                   |                 |                  |                   |
-    |-- mouseMove() --->|                 |                  |                   |
+    |-- normalizedMove() ->|               |                  |                   |
     |                   |-- drawPreview ->|                 |                   |
     |                   |   (Crashes)     |                  |                   |
     |                   |<-- exception ---|                  |                   |
@@ -627,7 +650,7 @@ The active tool lifecycle state machine:
                                   v
                              [ Active ] <──────────────+
                                   |                    |
-                                  | mousePress()       | drag
+                                  | pointerStart()     | drag
                                   v                    |
                              [ Dragging ] ─────────────+
                                   |
@@ -744,7 +767,7 @@ The following variables manage tool system interaction boundaries:
 - **`tool.coalesceFrequencyHz`**:
   - **Type**: Integer.
   - **Default**: `60`.
-  - **Description**: Fills mousemove events to match target display Hz.
+  - **Description**: Coalesces normalized pointer-move samples to match target display Hz.
 - **`tool.doubleClickIntervalMs`**:
   - **Type**: Integer.
   - **Default**: `300`.

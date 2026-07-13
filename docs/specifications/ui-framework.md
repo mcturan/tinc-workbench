@@ -23,10 +23,13 @@ The UI Framework is the presentation and windowing management layer of TINC Work
 # 3. Responsibilities
 
 - Rendering the outer application shell and routing viewport screens.
+- Owning raw DOM pointer, keyboard, touch, and wheel event intake through the application Input Router.
+- Normalizing input events and routing them to UI controls, Command Engine shortcuts, Tool System gestures, or Canvas viewport navigation according to routing precedence.
 - Coordinating docking panels (resizing, dragging, tabbed nesting).
 - Managing keyboard shortcuts and focus navigation.
 - Exposing UI APIs (Command Palette, Modals, Dialogs, Notifications).
 - Syncing Property Inspector inputs with the Selection Engine and Command Engine.
+- Mediating DOM pointer capture requests from the Tool System.
 
 ---
 
@@ -37,6 +40,8 @@ The UI Framework does NOT:
 - Track active object models or coordinate geometry (Object Engine / Geometry Engine domain).
 - Render canvas graphics (lines, components, wires) directly (Rendering Engine domain).
 - Process project file writes or manage local-first autosave backups (Storage Engine domain).
+- Mutate canonical project state directly.
+- Delegate raw DOM input ownership to the Canvas Engine.
 
 ---
 
@@ -45,7 +50,8 @@ The UI Framework does NOT:
 The UI Framework forms the outer layer of the system:
 
 - **Core Integrations**: Binds components to the Event Bus to receive state updates.
-- **Downstream Callbacks**: Dispatches execution directives to the Command Engine on user clicks.
+- **Input Router**: Owns raw DOM input intake, normalizes events, and routes them to UI controls, Tool System gestures, Canvas viewport navigation, or Command Engine shortcuts.
+- **Downstream Callbacks**: Dispatches state-changing directives to the Command Engine on user actions.
 - **Plugin Sandbox**: Limits custom views using rendering sandboxes.
 
 ```
@@ -191,7 +197,8 @@ Panels are modular workspace containers:
 # 20. Canvas Integration
 
 - **Resize Handler**: Listens to viewport resize events, updating drawing boundaries.
-- **Overlay Layer**: Renders selection overlays, grid lines, and ruler indicators.
+- **Viewport Routing**: The Input Router routes viewport navigation requests to Canvas Engine runtime viewport services when routing precedence selects canvas navigation.
+- **No Mutation Ownership**: Canvas integration does not mutate canonical project state.
 
 ---
 
@@ -199,6 +206,8 @@ Panels are modular workspace containers:
 
 - **Tool Highlighting**: Highlighting active tool icons on the toolbar.
 - **Cursor Syncing**: Syncs the canvas pointer cursor to match the active tool (e.g. crosshair for routing).
+- **Normalized Input Delivery**: The Input Router delivers normalized input events to the Tool System.
+- **Pointer Capture Mediation**: The UI Framework performs DOM pointer capture and release when requested by the Tool System.
 
 ---
 
@@ -211,14 +220,15 @@ Panels are modular workspace containers:
 
 # 23. Command Engine Integration
 
-- **Interaction**: Dispatches execution directives on user clicks.
+- **Interaction**: Dispatches state-changing directives through the Command Engine on user actions.
 - **History Bindings**: Dispatches undo/redo triggers.
+- UI actions that mutate canonical project state must dispatch through the Command Engine.
 
 ---
 
 # 24. Event Bus Integration
 
-- **Input Events**: Dispatches mouse coordinates and key presses to the Event Bus.
+- **Input Events**: Publishes UI-level input notifications only after Input Router normalization and routing decisions.
 - **UI Events**: Listens to layout changes and updates panel boundaries.
 
 ---
@@ -235,6 +245,60 @@ Panels are modular workspace containers:
 
 - **Shortcut Maps**: Maps key combinations to commands (e.g. `Ctrl+Z` -> Undo, `Ctrl+Y` -> Redo, `Delete` -> Delete Object).
 - **Conflict Prevention**: System shortcuts override default browser key behaviors.
+- **Mutation Safety**: Shortcuts that modify canonical project state dispatch through the Command Engine.
+
+---
+
+# 26.1. Input Router
+
+The Input Router is the UI Framework boundary for raw DOM input.
+
+Raw DOM inputs owned by the Input Router:
+
+- pointer events
+- keyboard events
+- touch events
+- wheel events
+
+Normalized input event contracts are conceptual data records that include:
+
+- input kind
+- phase
+- target UI region
+- screen coordinate when applicable
+- modifier state
+- pointer identifier when applicable
+- active canvas/page identifier when applicable
+
+Routing precedence:
+
+1. Modal UI and dialogs.
+2. Focused text fields and controls.
+3. Command Palette and global command shortcuts.
+4. Active Tool System gestures.
+5. Canvas viewport navigation.
+6. Passive UI notifications and status updates.
+
+Rules:
+
+- The Input Router sends normalized tool input to the Tool System.
+- The Tool System owns gesture and tool interpretation.
+- Canvas Engine owns runtime viewport services but does not own raw DOM input dispatch.
+- UI Framework and Input Router must not mutate canonical project state directly.
+- Any UI action that changes canonical project state dispatches through the Command Engine.
+
+---
+
+# 26.2. Pointer Capture Mediation
+
+Pointer capture is requested by the Tool System and performed by the UI Framework Input Router DOM boundary.
+
+Rules:
+
+- Tool System requests capture with the active pointer and target canvas context.
+- Input Router performs the DOM capture and continues sending normalized input to the Tool System.
+- Tool System requests release on gesture completion or cancellation.
+- Input Router releases DOM capture and restores normal routing precedence.
 
 ---
 
@@ -247,7 +311,7 @@ Panels are modular workspace containers:
 
 # 28. Drag and Drop
 
-- **Library Placement**: Dragging components from the library panel onto the canvas triggers object creation commands.
+- **Library Placement**: Dragging components from the library panel onto the canvas dispatches object creation commands through the Command Engine.
 - **Panel Rearrangement**: Dragging panel headers allows users to change panel layout positions.
 
 ---
@@ -376,7 +440,7 @@ Keyboard          UIFramework        ShortcutRegistry     CommandPalette      Co
    |                                                             |                  |
    |-- type("wire") -------------------------------------------->|                  |
    |-- pressEnter() -------------------------------------------->|                  |
-   |                                                             |-- execute(cmd) ->|
+   |                                                             |-- dispatch(cmd) >|
    |<-- closePalette --------------------------------------------|                  |
 ```
 
@@ -478,13 +542,14 @@ The docking layout panel states:
 
 # 52. Keyboard Event Routing and Shortcut Conflicts
 
-Keyboard inputs are processed using a priority queue:
+Keyboard inputs are processed by the Input Router using a priority queue:
 
 1. **Active Input Fields**: Enforce local text editing (first priority).
 2. **Modals & Dialogs**: Route events locally to trap user actions.
 3. **Command Palette**: Processes inputs when visible.
 4. **Global Key Mappings**: Bypasses canvas events (e.g., `Ctrl+S`).
-5. **Canvas Engine**: Captures actions if focus sits in the viewport grid (lowest priority).
+5. **Active Tool System Gestures**: Receives normalized keyboard events when tool context owns the focused canvas interaction.
+6. **Canvas Navigation**: Receives viewport navigation requests through Canvas Engine runtime viewport services.
 
 - **Conflicts**: Duplicate keybind mappings execute the command with the highest routing priority.
 
@@ -529,8 +594,8 @@ Keyboard inputs are processed using a priority queue:
 # 58. Inspector Validation and Command Dispatch
 
 - **58.1. Data Verification**: Changes in property fields are validated against expected types (e.g., colors must match hex patterns).
-- **58.2. Command Trigger**: If validation passes, the change is committed as an update command to the Command Engine.
-- **58.3. Undo Points**: Committing an inspector edit pushes a new node to the history stack.
+- **58.2. Command Trigger**: If validation passes, the change is dispatched as an update command to the Command Engine.
+- **58.3. Undo Points**: After Command Engine success, the history system records the resulting undo point.
 
 ---
 
@@ -543,15 +608,16 @@ Keyboard inputs are processed using a priority queue:
 
 # 60. Cross-Panel Drag-and-Drop
 
-- **60.1. Library Drops**: Dragging elements from library panels into target layers or canvas viewports creates objects on the target layer.
-- **60.2. Page Moves**: Dragging components between pages moves the components, updating Object Engine layers.
+- **60.1. Library Drops**: Dragging elements from library panels into target layers or canvas viewports dispatches object creation commands through the Command Engine.
+- **60.2. Page Moves**: Dragging components between pages dispatches move commands through the Command Engine.
 
 ---
 
 # 61. Canvas Focus and Pointer Capture Boundaries
 
-- **61.1. Pointer Capture**: During drawing gestures, the Canvas Engine captures the pointer, ensuring drag updates continue even if the cursor moves outside the browser window.
-- **61.2. Viewport Blur**: Clicking on sidebar panels releases the canvas pointer capture.
+- **61.1. Pointer Capture**: During drawing gestures, the Tool System requests pointer capture and the Input Router performs the DOM capture.
+- **61.2. Normalized Delivery**: Captured pointer movement is delivered to the Tool System as normalized input.
+- **61.3. Viewport Blur**: Clicking on sidebar panels causes the Input Router to release capture or cancel the active gesture according to Tool System cancellation rules.
 
 ---
 
@@ -701,7 +767,7 @@ AppShell          UIFramework         LayoutRegistry      StorageEngine       Ta
 This diagram shows context menu generation and dismiss events:
 
 ```
-CanvasUI          UIFramework         SelectionEngine     ContextMenu         TargetDisk
+InputRouter       UIFramework         SelectionEngine     ContextMenu         TargetDisk
    |                   |                     |                 |                  |
    |-- rightClick(P) ->|                     |                 |                  |
    |                   |-- querySelected() ->|                 |                  |
