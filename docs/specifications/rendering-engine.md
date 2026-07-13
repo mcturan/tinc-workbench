@@ -22,7 +22,7 @@ The Rendering Engine is the subsystem responsible for drawing the visual represe
 
 # 3. Responsibilities
 
-- Rendering canvas grid backgrounds, layers, visual objects, pins, ports, connection wires, and selection overlays.
+- Rendering canvas grid backgrounds, layers, visual objects, pins, ports, Wires, and selection overlays.
 - Managing rendering backends (HTML Canvas, WebGL, SVG).
 - Coordinating viewport-based frustum culling and Level of Detail (LOD) rendering.
 - Tracking dirty regions to perform incremental visual updates rather than full canvas redraws.
@@ -82,7 +82,7 @@ The render pipeline operates sequentially:
 4. **Drawing Passes**:
    - Pass 1: Background & Grid.
    - Pass 2: Object Layers.
-   - Pass 3: Connection wires.
+   - Pass 3: Wires.
    - Pass 4: Selection boxes and interactive handle overlays.
    - Pass 5: Infinite rulers and dynamic guides.
 5. **Frame Flush**: Commit visual buffers to display.
@@ -123,11 +123,11 @@ Before drawing a frame, the engine performs scene preparation:
 
 ---
 
-# 11. Connection Rendering
+# 11. Wire Rendering
 
-- Renders electrical wires, logical links, and busses.
+- Renders physical Wires (segmented routed traces) on the canvas.
 - Wires are drawn as multi-segment orthogonal lines or bezier curves.
-- Renders junction points (solid dots) where three or more connections intersect.
+- Renders junction points (solid dots) where three or more Wire segments intersect.
 
 ---
 
@@ -158,8 +158,14 @@ Renders transient visual aids that do not belong to the project document:
 
 # 15. Render Invalidation
 
-- Triggered by `core:object.updated` or viewport shift events from the Event Bus.
-- Marks specific Render Nodes as dirty. Invalidation propagates upwards (e.g. updating a child invalidates its parent group's bounds).
+- **Invalidation Ordering**: Following a state mutation, invalidation operates in a strict sequential cascade:
+  1. Command Engine commit.
+  2. Committed Event Bus publication.
+  3. Geometry Engine invalidates transform matrices, bounds, and spatial indexes.
+  4. Rendering Engine invalidates its Render Tree nodes and dirty regions.
+  5. Next frame render execution.
+- **Render Node Invalidation**: The Rendering Engine listens to committed Event Bus publications to identify mutated objects, marks corresponding Render Tree nodes as dirty, and registers the dirty visual regions.
+- **Mutations Blocked**: The Rendering Engine is strictly read-only relative to canonical state and does not contain any mutation paths back to the Object Engine.
 
 ---
 
@@ -172,26 +178,27 @@ Renders transient visual aids that do not belong to the project document:
 
 # 17. Render Batching
 
-Groups draw calls by style (e.g. drawing all red wires in a single pass) to minimize canvas state switches (e.g. changing stroke color).
+- Groups draw calls by style (e.g., drawing all red wires in a single pass) to minimize canvas state switches (e.g., changing stroke color).
 
 ---
 
 # 18. Geometry Integration
 
-- Retrieves world-to-screen projection coordinates from the Geometry Engine.
-- Retrieves OBB corners to render bounds overlays.
+- **Derived Geometry Consumption**: The Rendering Engine consumes derived Geometry Engine results (such as screen projection matrices, bounds, and OBB coordinates) and does not own or store canonical geometry.
+- **Cache Miss Tolerance**: The Rendering Engine must tolerate Geometry cache misses. If target derived geometric data is missing from the cache, the Rendering Engine requests/recomputes it dynamically through the Geometry Engine contracts.
 
 ---
 
 # 19. Canvas Engine Integration
 
-Listens to pan and zoom changes from the Canvas Engine to redraw background grids.
+- Listens to pan and zoom changes from the Canvas Engine to redraw background grids.
 
 ---
 
 # 20. Object Engine Integration
 
-Reads structural object hierarchies. The Object Engine acts as the source data, while the Rendering Engine handles visual representation.
+- **Read-Only Source**: Reads structural object hierarchies from the Object Engine. The Object Engine acts as the raw source data, while the Rendering Engine handles visual representation.
+- **No Mutation Paths**: The Rendering Engine must not mutate canonical document state or call Object Engine mutation APIs directly.
 
 ---
 
@@ -414,7 +421,7 @@ To ensure smooth and consistent canvas rendering:
 
 - **45.1. Construction**: When a project is loaded, the engine traverses the Object Model hierarchy and builds a matching Render Tree. Each node cache contains pre-calculated Screen Space coordinates and styling directives.
 - **45.2. Invalidation**: When an object is modified, the Event Bus publishes an update event. The Rendering Engine catches this, locates the target Render Node, and marks it dirty.
-- **45.3. Parent Invalidation**: Invalidation propagates upwards. Marking a child dirty invalidates the parent group's cached bounding box, forcing the engine to recalculate geometry on the next render pass.
+- **45.3. Parent Invalidation**: Visual dirty propagation moves upwards. Marking a child node dirty flags the parent visual container/group node in the Render Tree as dirty, ensuring parent group overlays or boundaries are updated during the next render frame.
 
 ---
 
@@ -537,6 +544,7 @@ The SVG backend translates interactive elements into static vector paths:
 
 # 60. Render Cache Lifecycle and Eviction
 
+- **Derived and Disposable Caching**: All render tree caches, tessellation/render buffers, off-screen canvas buffers, and GPU/CPU backend resources are strictly derived and disposable.
 - **Off-screen Buffers**: Complex static components are pre-rendered into off-screen canvas buffers.
 - **LRU Eviction**: Cache buffers are managed using a Least Recently Used (LRU) policy. When cache size exceeds 32 MB, the oldest buffers are cleared.
 - **Invalidation**: Modifying a cached component instantly clears its matching buffer.

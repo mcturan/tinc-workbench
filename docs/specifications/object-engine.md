@@ -90,38 +90,44 @@ The runtime lifecycle of registered elements:
 
 ---
 
-# 13. Ports
+# 13. Ports and Pins
 
-- Tracks port configurations on semantic objects, resolving coordinates relative to the parent component.
-- Links wire connections to port IDs.
+- Ports and Pins are structural sub-components of Semantic Objects, representing logical terminal points. They are NOT independent top-level registry objects.
+- `localPosition` is defined in the parent Semantic Object's coordinate space.
+- The Object Engine maintains runtime lookup indexes for Port/Pin identity resolution to support rapid netlist queries, but does not redefine their persisted schema.
 
 ---
 
-# 14. Pins
+# 14. LogicalConnections, Wires, and Endpoints
 
-- Tracks pin assignments on ICs, resolving logical signal assignments.
+- **LogicalConnection**: Represents the logical or netlist relationship (not a routed visual trace). It is the persisted owner of source and target Endpoint objects.
+- **Wire**: Represents the physical segmented routed trace. It references its semantic relationship using `logicalConnectionId` and stores segment path geometries (start/end coordinate points).
+- **Endpoint**: A discriminated union (PORT, PIN, FLOATING) owned strictly by the LogicalConnection. PORT/PIN endpoints reference target Ports/Pins, while FLOATING endpoints represent dangling, yet valid, persisted coordinates.
+- Wires and LogicalConnections are managed separately in the Object Engine, with Wires referencing LogicalConnections by ID.
 
 ---
 
 # 15. Transforms
 
-- Coordinates local and global matrix calculations with the Geometry Engine, invalidating child transforms when parents move.
+- The Object Engine coordinates raw transform attributes (such as `x`, `y`, and `rotation`).
+- The Object Engine does NOT compute, store, or cache transformation matrices. All transform matrix calculations and matrix caches are owned and managed exclusively by the Geometry Engine.
 
 ---
 
 # 16. Bounds
 
-- Interacts with the Geometry Engine to calculate Axis-Aligned Bounding Boxes (AABB) for complex groups.
+- The Object Engine owns raw dimension properties (`width`, `height`).
+- The Object Engine does NOT own or cache derived bounds caches (like Axis-Aligned Bounding Boxes or Oriented Bounding Boxes). The Geometry Engine owns derived bounds caches and spatial partitioning.
 
 ---
 
 # 17. Indexing
 
-Maintains secondary indexes to speed up spatial and property queries:
-
+The Object Engine maintains runtime indexes to accelerate semantic and identifier queries:
 - **Layer Index**: Quick lookup of objects by layer ID.
 - **Type Index**: Groups objects by type (e.g. all capacitors).
-- **Port Map**: Maps port IDs back to parent components.
+- **Port/Pin Map**: Maps port and pin IDs back to their parent Semantic Objects.
+- The Object Engine does NOT own or manage spatial Quadtree indexes; the spatial index is owned entirely by the Geometry Engine.
 
 ---
 
@@ -137,7 +143,7 @@ Maintains secondary indexes to speed up spatial and property queries:
 Enforces structural limits:
 
 - Component widths and heights must be positive numbers.
-- Port connections must link to existing wire endpoints.
+- LogicalConnections must reference existing Ports, Pins, or coordinates via their Endpoints. Wires must reference existing LogicalConnection IDs.
 - Type definitions must match target schema parameters.
 
 ---
@@ -145,19 +151,19 @@ Enforces structural limits:
 # 20. Cloning
 
 - Implements deep cloning algorithms, generating new UUIDs for cloned objects.
-- Resolves internal relative references (e.g. cloned wires update connections to target cloned ports).
+- Resolves internal relative references (e.g., cloned LogicalConnections update Endpoints to point to target cloned Ports/Pins, and cloned Wires update their logicalConnectionId references).
 
 ---
 
 # 21. Deletion
 
-- Evicts targets from the registry, cleans up connected wires, and removes parent-child links.
+- Evicts targets from the registry, disconnects associated LogicalConnections (setting their Endpoints to FLOATING), updates or prunes referencing Wires, and removes parent-child links.
 
 ---
 
 # 22. References
 
-- Maintains reference integrity, checking that port links do not point to deleted components.
+- Maintains reference integrity, ensuring that Endpoint references in LogicalConnections do not point to deleted Ports or Pins (converting them to FLOATING endpoints if their target Port/Pin is deleted).
 
 ---
 
@@ -175,37 +181,41 @@ Enforces structural limits:
 
 # 25. Command Integration
 
-- The Command Engine dispatches mutations through Object Engine transactions.
+- The Command Engine is the sole orchestration boundary for canonical mutations. All mutations reach the Object Engine only through Command Engine orchestration.
+- The Object Engine validates mutations against schemas and reference integrity rules, executes them in-memory, and returns validated mutation results back to the Command Engine.
 
 ---
 
 # 26. History Integration
 
-- The Object Engine supplies state deltas to the History Engine during transaction commits.
+- The Object Engine is completely ignorant of the History Engine and does not contain any references to history or undo/redo stacks.
+- The Object Engine does not record history; historical states and deltas are extracted and managed by the Command Engine and History Engine.
 
 ---
 
 # 27. Event Integration
 
-- Publishes change events (e.g. `core:object.registered`, `core:object.updated`) to the Event Bus.
+- The Object Engine does not publish committed mutation events. The Command Engine acts as the sole commit orchestrator and publishes committed events to the Event Bus only after successful mutation and history recording.
 
 ---
 
 # 28. Geometry Integration
 
-- Coordinates bounds and matrix calculations.
+- The Object Engine exposes the canonical object state (bounds, rotation, hierarchy) required for geometric computations.
+- The Object Engine does NOT own or store transform matrix caches, derived bounds caches, spatial indexes, or hit-test geometry. These are owned and managed entirely by the Geometry Engine.
 
 ---
 
 # 29. Rendering Integration
 
-- Notifies the Rendering Engine to invalidate dirty nodes.
+- The Object Engine is decoupled from and has no direct dependency on the Rendering Engine.
+- Rendering invalidation is reactive and triggered downstream by committed mutation events published by the Command Engine.
 
 ---
 
 # 30. Storage Integration
 
-- Supplies state data during saves, and hydrates on load.
+- Supplies canonical state snapshots during saves and hydrates in-memory structures on load. The Object Engine remains ignorant of serialization formatting.
 
 ---
 
@@ -253,21 +263,22 @@ The public API exposed by the Object Engine:
 
 # 37. ASCII Sequence Diagrams
 
-## 37.1. Object Registration Sequence
+### 37.1. Object Registration Sequence
 
 The diagram below details registering and resolving a component:
 
 ```
-CommandEngine       ObjectEngine       ObjectRegistry       EventBus       RenderingEngine
-      |                   |                  |                  |                 |
-      |-- register(Obj) ->|                  |                  |                 |
-      |                   |-- validate()     |                  |                 |
-      |                   |-- add(Obj) ----->|                  |                 |
-      |                   |                  |-- index()        |                 |
-      |                   |                                     |                 |
-      |                   |-- publish(Registered) ------------->|                 |
-      |                   |                                     |-- invalidate() >|
-      |<-- success -------|                                                       |
+CommandEngine       ObjectEngine       ObjectRegistry       EventBus       GeometryEngine     RenderingEngine
+      |                   |                  |                  |                 |                  |
+      |-- register(Obj) ->|                  |                  |                 |                  |
+      |                   |-- validate()     |                  |                 |                  |
+      |                   |-- add(Obj) ----->|                  |                 |                  |
+      |                   |                  |-- index()        |                 |                  |
+      |<-- success -------|                                     |                 |                  |
+      |                                                         |                 |                  |
+      |-- publish(core:object.registered) --------------------->|                 |                  |
+      |                                                         |-- invalidate() >|                  |
+      |                                                         |                 |-- invalidate() ->|
 ```
 
 ## 37.2. Reference Invalidation on Deletion
@@ -275,17 +286,17 @@ CommandEngine       ObjectEngine       ObjectRegistry       EventBus       Rende
 This diagram shows evicting references during component deletion:
 
 ```
-CommandEngine       ObjectEngine       ObjectRegistry       WiresRegistry      EventBus
-      |                   |                  |                  |                 |
-      |-- delete(id) ---->|                  |                  |                 |
-      |                   |-- queryWires() -------------------->|                 |
-      |                   |                                     |<-- connections -|
-      |                   |                                                       |
-      |-- disconnectWires() --------------->|                 |
-      |                   |-- remove(id) --->|                  |                 |
-      |                   |                  |-- unindex()      |                 |
-      |                   |                                                       |
-      |                   |-- publish(Evicted) ---------------------------------->|
+CommandEngine       ObjectEngine       ObjectRegistry       EventBus       GeometryEngine     RenderingEngine
+      |                   |                  |                  |                 |                  |
+      |-- delete(id) ---->|                  |                  |                 |                  |
+      |                   |-- disconnect() --|                  |                 |                  |
+      |                   |-- remove(id) --->|                  |                 |                  |
+      |                   |                  |-- unindex()      |                 |                  |
+      |<-- success -------|                                     |                 |                  |
+      |                                                         |                 |                  |
+      |-- publish(core:object.deleted) ------------------------>|                 |                  |
+      |                                                         |-- invalidate() >|                 |
+      |                                                         |                 |-- invalidate() ->|
 ```
 
 ---
@@ -563,33 +574,32 @@ Component deletions execute the following sequence:
 
 # 68. History Restoration Behavior
 
-- **Hydration Sequences**: Reverting or re-applying operations restores objects to their historical states.
-- **Registry Sync**: Updates IDs, properties, and parent-child links in the registry to match the historical checkpoint.
+- **Hydration Sequences**: Reverting or re-applying operations restores objects to their historical states via Command Engine orchestration.
+- **Registry Sync**: The Command Engine updates IDs, properties, and parent-child links in the registry to match the target state.
 
 ---
 
-# 69. Event Emission Ordering
+# 69. Mutation Execution Ordering
 
-To ensure consistent updates, change events are published in a strict order:
-
-1. **Registry Update**: Commit changes to memory structures.
-2. **Secondary Index Update**: Rebuild lookup indexes.
-3. **Event Bus Broadcast**: Publish change notifications.
-4. **Rendering Invalidation**: Invalidate dirty visual nodes.
+During transaction mutations, the Object Engine performs updates in the following strict internal sequence:
+1. **Validation**: Check properties against constraints and schemas.
+2. **Registry Update**: Commit validated changes to raw memory structures.
+3. **Secondary Index Update**: Rebuild internal lookup indexes (e.g., Layer Index, Port/Pin identity index).
+4. **Result Return**: Return the validated successful result to the Command Engine (which then triggers History recording and Event Bus publication).
 
 ---
 
 # 70. Geometry Invalidation Integration
 
-- **Trigger**: Property updates (e.g., bounds shifts) trigger geometry invalidations.
-- **Actions**: Clears cached bounding boxes and updates the spatial Quadtree index.
+- The Object Engine does not trigger geometry invalidations directly.
+- When the Command Engine publishes committed mutation events, the Geometry Engine intercepts them to invalidate its cached bounding boxes, matrices, and spatial Quadtree index.
 
 ---
 
 # 71. Rendering Invalidation Integration
 
-- **Trigger**: Fires when objects are modified, registered, or evicted.
-- **Actions**: Marks corresponding Render Tree nodes as dirty to force repaints.
+- The Object Engine does not notify the Rendering Engine of invalidations.
+- The Rendering Engine reactive listener intercepts committed events from the Event Bus to mark its Render Tree nodes dirty.
 
 ---
 
@@ -669,7 +679,7 @@ The table below outlines recovery protocols for common object failures:
 | :--- | :--- | :--- | :--- |
 | **UUID Collision** | Registration fails | Check active registry index | Abort transaction, throw `OE_ERR_ID_COLLISION`. |
 | **Circular Reference** | Stack overflow risk | Run DFS check before grouping | Block parent update, throw `OE_ERR_CIRCULAR_LINK`. |
-| **Dangling Wire Link** | Visual routing errors | Run reference audits | Disconnect wire from missing port, flag wire segment. |
+| **Dangling Endpoint Reference** | Visual routing errors | Run reference audits | Convert the affected Endpoint in LogicalConnection to FLOATING through Command Engine orchestration and flag referencing Wires as affected. |
 | **Plugin Schema Mismatch** | Custom object corrupts | Verify validation schemas | Load object with generic placeholder and fallback parameters. |
 
 ---
@@ -687,22 +697,24 @@ To ensure consistent project saves:
 
 ## 82.1. Deep Clone Reference Rewrite Sequence
 
-This diagram shows updating wire links to point to new cloned ports:
+This diagram shows cloning and updating cloned LogicalConnections and Wires:
 
 ```
-CommandEngine       ObjectEngine       ObjectRegistry       WiresRegistry       GeometryEngine
-      |                   |                  |                  |                  |
-      |-- clone(ids) ---->|                  |                  |                  |
-      |                   |-- duplicate() -->|                  |                  |
-      |                   |<-- cloned IDs ---|                  |                  |
-      |                   |   (Create ID Map)                                      |
-      |                   |                                                        |
-      |                   |-- rewriteReferences()                                  |
-      |                   |   (Map wire ports: Old_ID -> New_ID)                   |
-      |                   |                                                        |
-      |                   |-- registerClones() --->|                               |
-      |                   |-- rebuildQuadtree() ---------------------------------->|
-      |<-- success -------|                                                        |
+CommandEngine       ObjectEngine       ObjectRegistry       GeometryEngine
+      |                   |                  |                     |
+      |-- clone(ids) ---->|                  |                     |
+      |                   |-- duplicate() -->|                     |
+      |                   |<-- cloned IDs ---|                     |
+      |                   |   (Create ID Map)                      |
+      |                   |                                        |
+      |                   |-- rewriteReferences()                  |
+      |                   |   (Map LogicalConnections & Wires)     |
+      |                   |                                        |
+      |                   |-- registerClones() --->|               |
+      |<-- success -------|                                        |
+      |                                                            |
+      |-- rebuildSpatialIndex() ---------------------------------->|
+```
 ```
 
 ## 82.2. Circular Reference Detection and Interception
@@ -802,11 +814,12 @@ Represents original-to-cloned mappings for deep clone operations:
   "idMap": {
     "opamp-1": "opamp-1-clone-882",
     "opamp-1:pin-3": "opamp-1-clone-882:pin-3",
-    "wire-12": "wire-12-clone-883"
+    "logicalConnection-12": "logicalConnection-12-clone-883",
+    "wire-12": "wire-12-clone-884"
   },
   "rewrittenReferences": [
     {
-      "wireId": "wire-12-clone-883",
+      "logicalConnectionId": "logicalConnection-12-clone-883",
       "oldTargetPort": "opamp-1:pin-3",
       "newTargetPort": "opamp-1-clone-882:pin-3"
     }
@@ -823,7 +836,8 @@ Represents component references earmarked for eviction:
   "deletedObjectId": "opamp-1",
   "cascadeEvictions": {
     "ports": ["opamp-1:pin-1", "opamp-1:pin-2", "opamp-1:pin-3"],
-    "disconnectedWireIds": ["wire-12", "wire-14"]
+    "floatingConnectionIds": ["logicalConnection-12", "logicalConnection-14"],
+    "affectedWireIds": ["wire-12", "wire-14"]
   }
 }
 ```

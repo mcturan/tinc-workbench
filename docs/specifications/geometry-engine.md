@@ -82,7 +82,7 @@ The engine calculates bounding boxes to support rendering optimization and quick
 Determines if user interactions target specific canvas objects:
 
 - **Point-in-Rectangle**: Verifies if a coordinate falls inside an AABB or OBB.
-- **Point-on-Line/Curve**: Evaluates if a coordinate is within a specified click threshold distance of a wire connection or bezier segment.
+- **Point-on-Line/Curve**: Evaluates if a coordinate is within a specified click threshold distance of a Wire segment or bezier segment.
 - **Rectangle-in-Rectangle**: Detects intersection between selection marquee boxes and object bounds.
 - **Z-Index Resolution**: Returns the closest hit object using z-index properties to resolve overlaps.
 
@@ -92,9 +92,9 @@ Determines if user interactions target specific canvas objects:
 
 Snapping aligns coordinates to nearby features during dragging or placement gestures:
 
-- **Targets**: Grid increments, Guide lines, Object bounds (min, max, center), ports, and connections.
+- **Targets**: Grid increments, Guide lines, Object bounds (min, max, center), Ports, Pins, and Wires.
 - **Snapping Threshold**: The engine evaluates targets within a local radius (typically 10 Screen Space pixels).
-- **Resolution Priority**: If multiple snap targets exist, priority is resolved in order: Ports -> Grid -> Object Bounds.
+- **Resolution Priority**: If multiple snap targets exist, priority is resolved in order: Ports/Pins -> Grid -> Object Bounds.
 
 ---
 
@@ -166,9 +166,10 @@ To prevent linear scans of the entire Object Engine during rendering or selectio
 
 ---
 
-# 19. Memory Model
+# 19. Memory Model and Cache Ownership
 
-- **No Matrix Caching**: Recompute transformation matrices on demand to prevent memory bloat, except for parent composite symbols.
+- **Derived Caching**: The Geometry Engine maintains exclusive ownership of all derived geometric caches (transform matrices, bounds caches, spatial indexes, and hit-test geometry).
+- **Non-Canonical Storage**: These caches store derived mathematical values only and do not replicate or act as a primary/canonical object store.
 - **Flat Array Storage**: Spatial index entries use flat numeric arrays to optimize garbage collection sweeps.
 
 ---
@@ -283,7 +284,7 @@ To ensure consistent math processing, the Geometry Engine enforces a strict prec
 - **26.1. Data Representation**: All coordinates, dimensions, angles, and matrix coefficients are represented as IEEE 754 64-bit double-precision floating-point numbers.
 - **26.2. Epsilon Constants**: The engine defines the following primary constants to handle numerical comparison boundaries:
   - Coordinate comparison epsilon ($\epsilon = 10^{-7}$): Used to check point overlaps and bounding box touches.
-  - Angular epsilon ($\theta_{\epsilon} = 10^{-5}$ radians): Used to verify parallel wire connections and alignment vectors.
+  - Angular epsilon ($\theta_{\epsilon} = 10^{-5}$ radians): Used to verify parallel Wire segments and alignment vectors.
 - **26.3. Strict Equality Avoidance**: Calculations never use direct comparative operations (`==`) for floating-point values. Instead, they check absolute differences against the epsilon boundaries:
   ```
   |Value_A - Value_B| < Epsilon
@@ -371,10 +372,10 @@ For non-rectangular component shapes, the engine uses specialized testing:
 
 ---
 
-# 34. Port and Connection Hit-Testing
+# 34. Port, Pin, and Wire Hit-Testing
 
-- **34.1. Port Hit Radii**: Ports are modeled as circular targets with a default World Space radius of 5mm (approximately 18 mils). Hit testing checks the Euclidean distance between the click point and the port center.
-- **34.2. Connection Proximity**: Wire segments are hit-tested by projecting the click point orthogonally onto the wire line segment. A hit is registered if:
+- **34.1. Port and Pin Hit Radii**: Ports and Pins are modeled as circular targets with a default World Space radius of 5mm (approximately 18 mils). Hit testing checks the Euclidean distance between the click point and the port or pin center.
+- **34.2. Wire Proximity**: Wire segments (from the physical Wire traces) are hit-tested by projecting the click point orthogonally onto the wire line segment. A hit is registered if:
   ```
   Distance(ClickPoint, WireSegment) < ClickThreshold
   ```
@@ -390,8 +391,8 @@ During object dragging, the engine searches for snap targets:
 2. **Filtering**: Excludes the actively dragged object and its children from the returned candidate list.
 3. **Distance Calculation**: Computes the Euclidean distance to each candidate's snap points.
 4. **Ranking**: Targets are ranked by distance and priority type:
-   - Priority 1: Port centers (highest priority).
-   - Priority 2: Object center points and connection ends.
+   - Priority 1: Port and Pin centers (highest priority).
+   - Priority 2: Object center points and Wire endpoints.
    - Priority 3: Grid line intersections.
    - Priority 4: Bounding box edges.
 
@@ -471,11 +472,12 @@ For large-scale schematics, the engine applies the following optimizations:
 
 # 43. Geometry Caching
 
-To minimize redundant math calculations, the engine caches geometric properties:
+To minimize redundant math calculations and culling checks, the Geometry Engine maintains and owns derived geometric caches:
 
-- **Cached Properties**: Object AABBs, OBB coordinates, and local transformation matrices.
-- **Invalidation Policy**: Caches are cleared immediately when the Object Engine triggers a modification command.
-- **Verification**: Cached properties are re-evaluated during validation checks to ensure consistency before serialization.
+- **Cached Properties**: Object transform matrices, derived bounds (AABBs/OBBs), spatial partitioning indexes (Quadtree), and hit-test geometry caches.
+- **Derived Status**: These caches are strictly derived and non-canonical. The Geometry Engine does not perform canonical document mutations, and it never acts as a primary object store.
+- **Invalidation Policy**: Caches are invalidated and updated dynamically when the Geometry Engine intercepts committed mutation events from the Event Bus or receives explicit validated invalidation signals from the Command Engine.
+- **On-Demand Computation**: If a cache miss occurs, the derived properties are automatically recomputed using the raw canonical properties (e.g., coordinates, dimensions, parent-child linkages) exposed by the Object Engine.
 
 ---
 
