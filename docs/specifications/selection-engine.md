@@ -7,7 +7,7 @@
 
 # 1. Purpose
 
-The Selection Engine is the subsystem responsible for managing the active selection state within TINC Workbench. It tracks which objects (shapes, components, connections, ports) are currently selected by the user, coordinate workspace gestures, and synchronizes the selection state with the Inspector panel, command executors, and rendering overlays.
+The Selection Engine is the subsystem responsible for managing the active selection state within TINC Workbench. It tracks which objects (Components, LogicalConnections, Wires, Ports, Pins) are currently selected by the user, coordinates selection gestures, and exposes read-only selection state and projections to the Rendering Engine and other subsystems.
 
 ---
 
@@ -22,11 +22,10 @@ The Selection Engine is the subsystem responsible for managing the active select
 
 # 3. Responsibilities
 
-- Tracking active selected object IDs for the workspace.
+- Tracking the active selection set, primary selection identity, selection ordering, group drill-down selection context, selection bounds cache, and selection navigation state.
+- Calculating or refreshing the selection bounds cache (a selection-specific derived state only) by querying canonical/derived object bounds from the Object Engine/Geometry Engine and passing bounding boxes to Geometry Engine box-union and geometric utility contracts.
 - Resolving selection cycles when clicking overlapping objects.
 - Checking layers (locking, visibility) to block selection of locked or hidden components.
-- Intersecting bounding boxes with marquee selection rectangles.
-- Querying the Geometry Engine to compute collective selection bounds and handle offsets.
 - Publishing selection updates via the Event Bus.
 
 ---
@@ -35,9 +34,10 @@ The Selection Engine is the subsystem responsible for managing the active select
 
 The Selection Engine does NOT:
 
-- Render selection boxes, dashed lines, or drag handles (delegated to the Rendering Engine).
-- Mutate object attributes or execute reposition commands (delegated to the Command Engine).
-- Calculate shape boundaries or perform raw coordinate transforms (delegated to the Geometry Engine).
+- Render selection outlines, selection boxes, transform handles, or selection visual overlays (delegated strictly to the Rendering Engine; the Canvas Engine must not draw selection visuals).
+- Mutate object attributes or execute reposition/layout commands directly. Selection changes themselves are transient UI/editor state. Any transform, delete, move, duplicate, grouping, or property operations initiated from a selection must dispatch canonical mutations through the Command Engine.
+- Calculate raw object boundaries, transform matrix caches, object AABB/OBB canonical caches, spatial indexes, or hit-test geometry caches (delegated to the Geometry/Object Engines).
+- Manage rendering caches (delegated to the Rendering Engine).
 
 ---
 
@@ -45,23 +45,24 @@ The Selection Engine does NOT:
 
 The Selection Engine sits in the Core Services layer, acting as the state coordinator:
 
-- **Upstream Inputs**: Receives click and drag-box coordinate gestures from the Canvas Engine and keyboard events from the UI Framework.
+- **Upstream Inputs**: Receives selection modifications and query requests from the Tool System (which interprets normalized inputs from the UI Framework / Input Router).
 - **Downstream Collaborators**:
-  - Queries the Geometry Engine's Quadtree index to locate components in selected coordinates.
-  - Queries the Object Engine to verify locking and visibility flags.
-  - Publishes state shifts to the Event Bus (`ui:selection.changed`).
+  - Queries the Geometry Engine to compute bounding box unions and geometric transformations.
+  - Queries the Object Engine to verify locking, visibility, and retrieve component boundaries.
+  - Publishes selection state changes to the Event Bus (`ui:selection.changed`).
+- **Output Consumers**: Exposes read-only selection projections and bounds to the Rendering Engine for drawing overlays.
 
 ```
 +-----------------------------------------------------------------+
-|                         Canvas Engine                           |
+|                         Tool System                             |
 +-----------------------------------------------------------------+
-       │ (Send mouse click/drag gestures)
+       │ (Send selection modifications/queries)
        ▼
 +-----------------------------------------------------------------+
 |                     Selection Engine                            |
 +-----------------------------------------------------------------+
        │                                  ▲
-       │ (Query spatial quadtree)         │ (Publish selection events)
+       │ (Query bounding box unions)      │ (Publish selection events)
        ▼                                  │
 +------------------------------------+    │
 |         Geometry Engine            |    │
@@ -79,7 +80,7 @@ The Selection Engine sits in the Core Services layer, acting as the state coordi
 - **State Properties**:
   - `selectedIds`: A set of stable unique ID strings representing selected entities.
   - `primaryId`: The ID of the primary selected object (used as alignment anchor or reference).
-  - `bounds`: The collective AABB enclosing all selected objects.
+  - `bounds`: The collective selection bounds cache. This is a selection-specific derived state only, recomputed through the Geometry Engine box-union contract. It is not a canonical property of the objects.
 - **Validation**: Selection updates clean out invalid references (e.g. deleted objects).
 
 ---
@@ -98,7 +99,11 @@ Initiated by holding modifier keys (Shift or Ctrl) during click gestures. Append
 
 # 9. Rectangle Selection
 
-Initiated by dragging the mouse to create a selection marquee box. The engine queries the Quadtree for objects overlapping the box coordinates.
+- **Tool System Coordination**: The Tool System interprets the marquee gesture.
+- **Marquee Geometry**: The Tool System supplies the marquee geometry to the Geometry Engine.
+- **Spatial Discovery**: The Geometry Engine performs spatial candidate discovery and geometric intersection evaluation using its spatial Quadtree index.
+- **Intersection Semantics**: The Geometry Engine returns the candidate object IDs matching the crossing/window selection rules.
+- **Selection State Update**: The Tool System passes the resulting selection intent and candidate IDs to the Selection Engine, which applies selection state rules. The Selection Engine does not query the Quadtree directly.
 
 ---
 
@@ -110,19 +115,22 @@ Selection mode where objects are selected if their bounds intersect the selectio
 
 # 11. Lasso Selection
 
-Selection mode using a free-form path. Evaluates point-in-polygon intersections against the lasso path.
+Selection mode using a free-form path. The Tool System collects lasso path vertices and queries the Geometry Engine, which evaluates point-in-polygon intersections against the lasso path and returns matching candidate IDs.
 
 ---
 
 # 12. Click Selection
 
-Point-click mechanics. Executes hit-testing algorithms to identify the clicked object under the mouse cursor.
+Point-click mechanics. The Tool System coordinates queries to the Geometry Engine to execute hit-testing algorithms and identify the clicked object under the mouse cursor.
 
 ---
 
 # 13. Selection Hit Testing
 
-Integrates with the Geometry Engine. Evaluates point-in-bounds, point-on-line, or point-on-curve checks.
+- **Hit-Test Queries**: The Tool System queries the Geometry Engine's hit-test APIs using normalized pointer coordinates and applicable clearance tolerances.
+- **Hit-Test Computation**: The Geometry Engine performs hit-test computation using its derived hit-test geometry caches (for point-in-bounds, point-on-line, and point-on-curve checks).
+- **Candidate Resolution**: The Geometry Engine returns ordered candidate IDs and geometric hit metadata.
+- **Selection State Update**: The Tool System applies interaction/tool precedence rules and passes candidate IDs or resolved selection intent to the Selection Engine, which updates the selection state. The Selection Engine performs no geometric hit-test calculations.
 
 ---
 
@@ -130,13 +138,15 @@ Integrates with the Geometry Engine. Evaluates point-in-bounds, point-on-line, o
 
 Hit testing priority rules:
 
-- Ports and pins (highest priority) -> Small components -> Large shapes -> Connections and wires (lowest priority).
+- Ports and Pins (highest priority) -> Small Components -> Large shapes -> Wires and LogicalConnections (lowest priority).
 
 ---
 
 # 15. Selection Cycling
 
-If the user clicks repeatedly in the same pixel coordinate containing overlapping objects, the engine cycles the selection through the overlapping candidates sequentially.
+- **Candidate Discovery**: The Tool System queries the Geometry Engine for overlapping candidates at the cursor position, receives the ordered list of candidate IDs, and passes these `candidateIds` to the Selection Engine.
+- **Cycling State Rules**: The Selection Engine applies repeated-click cycling rules and updates the selection target. It does not receive coordinate points directly for spatial candidate discovery.
+- **Cycling Metadata**: The Selection Engine retains cycling metadata (such as prior candidate sequence identity, current cycle index, and reset state) as selection-specific, non-canonical editor state.
 
 ---
 
@@ -172,13 +182,13 @@ Clicking a semantic component (e.g., resistor, integrated circuit) selects the e
 
 # 21. Connection Selection
 
-Wires and logical busses can be selected independently by clicking their wire segments.
+Wires can be selected independently by clicking their routed physical trace segments. LogicalConnections can represent logical/netlist relationship selection where supported (e.g. selecting a net or logical path through list or schema views). Wires do not own Port or Pin Endpoints; they reference LogicalConnections via `logicalConnectionId`.
 
 ---
 
 # 22. Port and Pin Selection
 
-In specific tool contexts (e.g., routing wires), ports and pins are target-selectable, overriding base component selections.
+In specific tool contexts (e.g., routing wires), Ports and Pins (which are structural sub-components of Semantic Objects) are target-selectable, overriding base component selections.
 
 ---
 
@@ -196,19 +206,19 @@ Double-clicking a group drills down into its hierarchy, allowing the user to sel
 
 # 25. Selection Bounds
 
-The engine calculates the collective bounding box (AABB) of the selection by merging the AABBs of all selected objects.
+The Selection Engine calculates and refreshes the selection bounds cache (a selection-specific derived state) by querying canonical/derived object bounds from the Object/Geometry Engine and passing these bounding boxes to the Geometry Engine box-union and geometric utility contracts.
 
 ---
 
 # 26. Selection Handles
 
-The engine defines logical locations for 8 transform handles (corners and midpoints) and a rotation anchor relative to the selection bounds.
+The Selection Engine computes logical coordinate positions for 8 transform handles (corners and midpoints) and a rotation anchor relative to the selection bounds cache. It exposes these coordinates as read-only selection projections to the Rendering Engine, which alone draws handles, outlines, selection boxes, and overlays.
 
 ---
 
 # 27. Selection Transform Integration
 
-Integrates with the Command Engine during drag-moves or scale actions. The Selection Engine supplies target IDs, and the Command Engine executes translation or rotation commands.
+Integrates with the Command Engine during transform gestures (drag-moves or scale actions). The Selection Engine does not mutate canonical document state directly. It supplies target IDs and drag vectors to the Command Engine, which validates and executes canonical mutation commands.
 
 ---
 
@@ -256,13 +266,15 @@ Publishes `ui:selection.changed` event. Property panels and inspector views subs
 
 # 34. Geometry Engine Integration
 
-Queries the Quadtree index and bounding box union APIs.
+- **No Spatial Index Queries**: The Selection Engine does not query the Quadtree or spatial index directly. All spatial candidate discovery and hit testing are coordinated by the Tool System.
+- **Utility Calculations**: The Selection Engine uses Geometry Engine contracts only for selection-specific derived geometry utilities, such as bounding box union operations, selection bounds aggregation, and geometric calculations required for selection projections.
 
 ---
 
 # 35. Canvas Engine Integration
 
-Uses viewport coordinates to resolve click coordinates.
+- The Selection Engine remains ignorant of raw Canvas Engine coordinate transformations. Viewport coordinates and drag-selection rectangles are resolved by the Tool System before querying Selection Engine state.
+- The Canvas Engine must not draw selection outlines, selection boxes, transform handles, or overlays.
 
 ---
 
@@ -312,7 +324,7 @@ The public API exposed by the Selection Engine:
 
 Low-level methods reserved for the Core framework:
 
-- **cycleSelection(point)**: Iterates selection target among overlapping candidates at the given point.
+- **cycleSelection(candidateIds)**: Cycles selection target sequentially among the provided list of candidate IDs.
 - **drillDownGroup(groupId)**: Opens group context to select child elements.
 - **invalidateBounds()**: Forces recalculation of selection AABB.
 
@@ -331,9 +343,9 @@ Low-level methods reserved for the Core framework:
 The diagram below demonstrates how box selection intersects objects in viewport space:
 
 ```
-CanvasUI          SelectionEngine      GeometryEngine       EventBus         ObjectEngine
+ToolSystem        SelectionEngine      GeometryEngine       EventBus         ObjectEngine
    |                     |                   |                 |                  |
-   |-- marqueeDrag(box)->|                   |                 |                  |
+   |-- queryBox(box) --->|                   |                 |                  |
    |                     |-- query(box) ---->|                 |                  |
    |                     |<-- candidates ----|                 |                  |
    |                     |                                     |                  |
@@ -342,7 +354,6 @@ CanvasUI          SelectionEngine      GeometryEngine       EventBus         Obj
    |                     |                                     |                  |
    |                     |-- setSelection()                    |                  |
    |                     |-- publish(SelectionChanged) ------->|                  |
-   |<-- redrawSelection -|                                     |                  |
 ```
 
 ## 44.2. Overlap Cycling Sequence
@@ -350,9 +361,9 @@ CanvasUI          SelectionEngine      GeometryEngine       EventBus         Obj
 This diagram shows how repeated clicks cycle selection targeting:
 
 ```
-CanvasUI          SelectionEngine      GeometryEngine      ObjectEngine
+ToolSystem        SelectionEngine      GeometryEngine      ObjectEngine
    |                     |                   |                  |
-   |-- click(X, Y) ----->|                   |                  |
+   |-- queryPoint(X,Y) ->|                   |                  |
    |                     |-- queryPoint() -->|                  |
    |                     |<-- candidates ----|                  |
    |                     |   (e.g., [A, B])  |                  |
@@ -361,7 +372,6 @@ CanvasUI          SelectionEngine      GeometryEngine      ObjectEngine
    |                     |   (Check last selected)              |
    |                     |                                      |
    |                     |-- select(B)                          |
-   |<-- selected(B) -----|                                      |
 ```
 
 ---
@@ -441,7 +451,7 @@ The Selection Engine transitions through the following operational states:
 
 # 51. Overlapping Object Candidate Ranking
 
-When a click occurs where multiple objects overlap, candidates are ranked using the following criteria:
+When a click occurs where multiple objects overlap, the Geometry Engine ranks candidate objects using the following criteria:
 
 1. **Distance to Origin**: The Euclidean distance between the click coordinate and the candidate's bounds origin.
 2. **Object Area**: Smaller objects are ranked higher than larger ones to prevent background shapes from blocking smaller components.
@@ -451,7 +461,7 @@ When a click occurs where multiple objects overlap, candidates are ranked using 
 
 # 52. Selection Cycling Order and Reset Conditions
 
-- **52.1. Cycling Loop**: Repeated clicks within 500ms at the same coordinate cycle through the ranked list of overlapping components.
+- **52.1. Cycling Loop**: Repeated clicks within 500ms at the same coordinate cause the Tool System to request candidate lists from the Geometry Engine and pass the ranked candidate list to the Selection Engine's cycle API.
 - **52.2. Reset Conditions**: The cycling index is reset under the following conditions:
   - The cursor moves more than 5 pixels from the click coordinate.
   - The time interval between clicks exceeds 500ms.
@@ -471,8 +481,8 @@ The selection behavior of the drag marquee rectangle changes based on the drag d
 # 54. Lasso Polygon Intersection Rules
 
 - **54.1. Polygon Definition**: The lasso path is modeled as a closed polygon defined by cursor coordinates collected during the drag gesture.
-- **54.2. Intersection Algorithm**: The engine uses the ray-casting algorithm from the Geometry Engine to verify if an object's boundary points fall inside the lasso polygon.
-- **54.3. Inclusion Threshold**: An object is selected if more than 50% of its vertices fall inside the lasso polygon.
+- **54.2. Intersection Algorithm**: The Tool System coordinates the query, requesting the Geometry Engine to use its ray-casting algorithm to verify if an object's boundary points fall inside the lasso polygon.
+- **54.3. Inclusion Threshold**: An object is marked as selected if the Geometry Engine determines that more than 50% of its vertices fall inside the lasso polygon.
 
 ---
 
@@ -487,23 +497,23 @@ Click hit tolerances scale dynamically based on the viewport zoom level:
 
 # 56. Dense Schematic Selection Behavior
 
-- **56.1. Selection Density**: In dense schematic regions, hit testing evaluates ports and connection endpoints before checking large component bounds.
-- **56.2. Selection Filtering**: Users can apply selection filters (e.g., select only wires) to prevent accidental selections in dense zones.
+- **56.1. Selection Density**: In dense schematic regions, the Tool System coordinates hit-testing queries, prioritizing Ports and Pins before checking large Component bounds.
+- **56.2. Selection Filtering**: Users can apply selection filters (e.g., select only Wires) to prevent accidental selections in dense zones.
 
 ---
 
 # 57. Electrical Port and Pin Selection Priority
 
-- **57.1. Port Target Priority**: Port centers have highest hit testing priority. If a port is hit, the engine suppresses the parent component selection.
-- **57.2. Connection Context**: In connection routing modes, pins are target-selectable, overriding component selections.
+- **57.1. Port Target Priority**: Port centers have the highest hit-testing priority. If a Port is hit, the Tool System suppresses the parent Component selection when passing the selection target to the Selection Engine.
+- **57.2. Connection Context**: In connection routing modes, Pins are target-selectable, overriding base Component selections.
 
 ---
 
 # 58. Wire and Connection Segment Selection
 
-- **58.1. Segment Selection**: Clicking a wire selects only the specific clicked segment (line between two vertices).
-- **58.2. Net Selection**: Double-clicking a wire segment selects the entire connection path (the net).
-- **58.3. Vertex Selection**: Click gestures near wire vertices select the vertex, allowing path adjustments.
+- **58.1. Segment Selection**: Clicking a Wire selects only the specific clicked routed segment. Wires do not own Port or Pin Endpoints; they reference LogicalConnections via `logicalConnectionId`.
+- **58.2. LogicalConnection Selection**: Double-clicking a Wire segment selects the entire logical/netlist relationship (LogicalConnection or Net) where supported.
+- **58.3. Vertex Selection**: Click gestures near Wire vertices select the vertex, allowing path adjustments.
 
 ---
 
