@@ -1,0 +1,236 @@
+// Core Domain Model Types
+
+export interface Coordinate {
+  x: number;
+  y: number;
+}
+
+export type EndpointType = 'PORT' | 'PIN' | 'FLOATING';
+
+export interface PortEndpoint {
+  type: 'PORT';
+  targetId: string; // Format: "componentId:portId"
+  coordinate?: never;
+}
+
+export interface PinEndpoint {
+  type: 'PIN';
+  targetId: string; // Format: "componentId:pinId"
+  coordinate?: never;
+}
+
+export interface FloatingEndpoint {
+  type: 'FLOATING';
+  coordinate: Coordinate;
+  targetId?: never;
+}
+
+export type Endpoint = PortEndpoint | PinEndpoint | FloatingEndpoint;
+
+export interface Port {
+  id: string;
+  name: string;
+  direction: 'input' | 'output' | 'bidirectional' | 'passive' | 'tri-state';
+  signalCategory: string; // e.g., 'analog', 'digital', etc.
+}
+
+export interface Pin {
+  id: string;
+  name: string;
+  direction: 'input' | 'output' | 'bidirectional' | 'passive' | 'tri-state';
+  signalCategory: string;
+}
+
+export interface SemanticObject {
+  id: string;
+  type: string;
+  name: string;
+  ports: Port[];
+  pins: Pin[];
+  properties: Record<string, any>;
+}
+
+export interface Layer {
+  id: string;
+  name: string;
+  visible: boolean;
+  locked: boolean;
+  objects: SemanticObject[];
+}
+
+export interface Page {
+  id: string;
+  name: string;
+  layers: Layer[];
+  viewport: ViewportState;
+}
+
+export interface Project {
+  id: string;
+  name: string;
+  pages: Page[];
+}
+
+export interface LogicalConnection {
+  id: string;
+  source: Endpoint;
+  target: Endpoint;
+  netId: string;
+  metadata?: Record<string, any>;
+}
+
+export interface WireSegment {
+  start: Coordinate;
+  end: Coordinate;
+}
+
+export interface Wire {
+  id: string;
+  logicalConnectionId: string;
+  segments: WireSegment[];
+  style?: {
+    color?: string;
+    width?: number;
+    dashArray?: string;
+    [key: string]: any;
+  };
+  metadata?: Record<string, any>;
+}
+
+// ----------------------------------------------------
+// Subsystem / Infrastructure Interface Contracts
+// ----------------------------------------------------
+
+export interface ViewportState {
+  zoom: number;
+  panX: number;
+  panY: number;
+}
+
+export interface MutationDelta {
+  added: any[];
+  updated: any[];
+  deleted: string[];
+}
+
+export interface Command {
+  id: string;
+  name: string;
+  payload: any;
+  execute(context: any): CommandResult;
+  undo?(context: any): CommandResult;
+}
+
+export interface CommandResult {
+  success: boolean;
+  delta?: MutationDelta;
+  error?: string;
+}
+
+export interface Transaction {
+  id: string;
+  commands: Command[];
+}
+
+export interface HistoryNode {
+  id: string;
+  parentId: string | null;
+  commandId: string;
+  description: string;
+  timestamp: number;
+}
+
+export interface HistorySnapshot {
+  historyNodeId: string;
+  projectState: Project;
+}
+
+export interface Event {
+  id?: string;
+  type?: string;
+  timestamp?: number;
+  namespace: string;
+  name: string;
+  payload: any;
+  context?: Record<string, any>;
+}
+
+export interface EventSubscription {
+  id: string;
+  namespace: string;
+  name: string;
+  priority: number; // 0 to 100
+  callback: (event: Event) => void | Promise<void>;
+}
+
+export interface GeometryService {
+  pointToSegmentDistance(point: Coordinate, start: Coordinate, end: Coordinate): number;
+  calculateBoundingBox(points: Coordinate[]): { min: Coordinate; max: Coordinate };
+  intersects(boxA: { min: Coordinate; max: Coordinate }, boxB: { min: Coordinate; max: Coordinate }): boolean;
+}
+
+export interface SpatialQueryService {
+  queryRange(box: { min: Coordinate; max: Coordinate }): string[];
+}
+
+export interface RenderProjection {
+  worldToScreen(coord: Coordinate): Coordinate;
+  screenToWorld(coord: Coordinate): Coordinate;
+}
+
+export interface NormalizedInputEvent {
+  type: 'pointerdown' | 'pointermove' | 'pointerup' | 'keydown' | 'keyup';
+  coord: Coordinate;
+  key?: string;
+  modifiers: {
+    ctrl: boolean;
+    shift: boolean;
+    alt: boolean;
+  };
+}
+
+export interface Tool {
+  id: string;
+  name: string;
+  onActivate(): void;
+  onDeactivate(): void;
+  onInput(event: NormalizedInputEvent): void;
+}
+
+export interface SelectionState {
+  selectedIds: string[];
+  primaryId: string | null;
+  cyclingCandidates: string[];
+}
+
+export interface StorageSnapshot {
+  project: Project;
+  logicalConnections: LogicalConnection[];
+  wires: Wire[];
+}
+
+export interface StorageProvider {
+  readFile(path: string): Promise<string>;
+  writeFile(path: string, content: string): Promise<void>;
+  deleteFile(path: string): Promise<void>;
+}
+
+export interface PluginCapability {
+  name: string;
+  granted: boolean;
+}
+
+export interface PluginManifest {
+  id: string;
+  name: string;
+  version: string;
+  capabilities: string[];
+}
+
+export interface PermissionDecision {
+  allowed: boolean;
+  reason?: string;
+}
+
+export type CanonicalEntity = Project | Page | Layer | SemanticObject | Port | Pin | LogicalConnection | Wire;
+export type CanonicalEntityKind = 'Project' | 'Page' | 'Layer' | 'SemanticObject' | 'Port' | 'Pin' | 'LogicalConnection' | 'Wire';
