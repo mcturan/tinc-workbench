@@ -117,8 +117,7 @@ export interface Command {
   id: string;
   name: string;
   payload: any;
-  execute(context: any): CommandResult;
-  undo?(context: any): CommandResult;
+  timestamp?: number;
 }
 
 export interface CommandResult {
@@ -132,12 +131,30 @@ export interface Transaction {
   commands: Command[];
 }
 
+export type DeltaAction =
+  | { type: 'CREATE_PAGE'; page: Page }
+  | { type: 'DELETE_PAGE'; pageId: string; resolvedCoordinates?: Record<string, { x: number; y: number }> }
+  | { type: 'CREATE_LAYER'; pageId: string; layer: Layer }
+  | { type: 'DELETE_LAYER'; layerId: string; resolvedCoordinates?: Record<string, { x: number; y: number }> }
+  | { type: 'CREATE_COMPONENT'; layerId: string; component: SemanticObject }
+  | { type: 'DELETE_COMPONENT'; componentId: string; resolvedCoordinates?: Record<string, { x: number; y: number }> }
+  | { type: 'CREATE_CONNECTION'; connection: LogicalConnection }
+  | { type: 'DELETE_CONNECTION'; connectionId: string }
+  | { type: 'CREATE_WIRE'; wire: Wire }
+  | { type: 'DELETE_WIRE'; wireId: string };
+
+export interface HistoryDelta {
+  forward: DeltaAction[];
+  reverse: DeltaAction[];
+}
+
 export interface HistoryNode {
   id: string;
   parentId: string | null;
   commandId: string;
   description: string;
   timestamp: number;
+  delta: HistoryDelta;
 }
 
 export interface HistorySnapshot {
@@ -234,3 +251,24 @@ export interface PermissionDecision {
 
 export type CanonicalEntity = Project | Page | Layer | SemanticObject | Port | Pin | LogicalConnection | Wire;
 export type CanonicalEntityKind = 'Project' | 'Page' | 'Layer' | 'SemanticObject' | 'Port' | 'Pin' | 'LogicalConnection' | 'Wire';
+
+export class ValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ValidationError';
+  }
+}
+
+export class CommandExecutionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CommandExecutionError';
+  }
+}
+
+export class FatalIntegrityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'FatalIntegrityError';
+  }
+}
