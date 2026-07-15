@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { generateUUID } from '../utils';
 import {
   Project,
   Page,
@@ -351,17 +351,17 @@ export class ObjectEngine {
 
     // 2. Generate UUID mappings
     for (const obj of objectsToClone) {
-      const newId = randomUUID();
+      const newId = generateUUID();
       idMap.set(obj.id, newId);
 
       const kind = this.entityKinds.get(obj.id)!;
       if (kind === 'SemanticObject') {
         const comp = obj as SemanticObject;
         for (const port of comp.ports) {
-          idMap.set(port.id, randomUUID());
+          idMap.set(port.id, generateUUID());
         }
         for (const pin of comp.pins) {
-          idMap.set(pin.id, randomUUID());
+          idMap.set(pin.id, generateUUID());
         }
       }
     }

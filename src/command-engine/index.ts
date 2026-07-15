@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { generateUUID } from '../utils';
 import {
   Command,
   CommandResult,
@@ -96,7 +96,7 @@ export class CommandEngine {
 
   executeTransaction(commands: Command[], transactionId?: string): CommandResult {
     const appliedDeltas: HistoryDelta[] = [];
-    const tId = transactionId ?? randomUUID();
+    const tId = transactionId ?? generateUUID();
 
     try {
       // 1. Validation phase (validate all first)

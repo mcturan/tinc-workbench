@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { generateUUID } from '../utils';
 import { Event, EventSubscription } from '../types';
 
 export class EventBus {
@@ -22,7 +22,7 @@ export class EventBus {
       throw new Error('Priority must be an integer between 0 and 100 inclusive');
     }
 
-    const subscriptionId = randomUUID();
+    const subscriptionId = generateUUID();
     const sync = options?.sync ?? false;
 
     let namespace = '*';
