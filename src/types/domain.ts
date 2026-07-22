@@ -48,6 +48,7 @@ export interface SemanticObject {
   ports: Port[];
   pins: Pin[];
   properties: Record<string, any>;
+  inventoryItemId?: string; // Reference to workshop inventory
 }
 
 export interface Layer {
@@ -65,10 +66,22 @@ export interface Page {
   viewport: ViewportState;
 }
 
+export interface ProjectDocumentation {
+  notes: string;
+  designDecisions: string;
+  todoList: string;
+  changelog: string;
+  datasheetReferences: string[];
+  externalReferences: string[];
+}
+
+// Ensure the WorkshopState type exists without strict coupling to the internal structure
 export interface Project {
   id: string;
   name: string;
   pages: Page[];
+  documentation?: ProjectDocumentation;
+  workshop?: any; // Represents WorkshopState
 }
 
 export interface LogicalConnection {
@@ -141,7 +154,22 @@ export type DeltaAction =
   | { type: 'CREATE_CONNECTION'; connection: LogicalConnection }
   | { type: 'DELETE_CONNECTION'; connectionId: string }
   | { type: 'CREATE_WIRE'; wire: Wire }
-  | { type: 'DELETE_WIRE'; wireId: string };
+  | { type: 'DELETE_WIRE'; wireId: string }
+  | { type: 'MOVE_COMPONENT'; componentId: string; x: number; y: number; wireUpdates?: { wireId: string; segments: WireSegment[] }[] }
+  | { type: 'CREATE_FOOTPRINT'; boardId: string; footprint: any }
+  | { type: 'DELETE_FOOTPRINT'; boardId: string; footprintId: string }
+  | { type: 'UPDATE_FOOTPRINT'; boardId: string; footprintId: string; updates: any }
+  | { type: 'CREATE_PCB_OBJECT'; boardId: string; object: any }
+  | { type: 'DELETE_PCB_OBJECT'; boardId: string; objectId: string }
+  | { type: 'UPDATE_PCB_OBJECT'; boardId: string; objectId: string; updates: any }
+  | { type: 'SET_BOARD_OUTLINE'; boardId: string; outline: any[] }
+  | { type: 'CREATE_SYMBOL_ITEM'; docId: string; item: any }
+  | { type: 'DELETE_SYMBOL_ITEM'; docId: string; itemId: string }
+  | { type: 'UPDATE_SYMBOL_ITEM'; docId: string; itemId: string; updates: any }
+  | { type: 'UPDATE_PROJECT_DOCUMENTATION'; doc: ProjectDocumentation | undefined }
+  | { type: 'CREATE_DEVICE_OBJECT'; layerId: string; object: any }
+  | { type: 'DELETE_DEVICE_OBJECT'; objectId: string }
+  | { type: 'UPDATE_DEVICE_OBJECT'; objectId: string; updates: any };
 
 export interface HistoryDelta {
   forward: DeltaAction[];

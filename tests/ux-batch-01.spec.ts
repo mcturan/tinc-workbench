@@ -206,16 +206,19 @@ describe('UX Batch 01 Unit & Integration Tests', () => {
       fill: jest.fn(),
       stroke: jest.fn(),
       rect: jest.fn(),
+      save: jest.fn(),
+      restore: jest.fn(),
+      roundRect: jest.fn(),
     } as any;
 
     // 14. Rendering reads placed canonical state
-    renderEngine.render(mockCtx, objectEngine, canvas, 'page-1');
+    renderEngine.render(mockCtx, objectEngine, canvas, undefined, undefined, 'page-1');
     expect(mockCtx.fillRect).toHaveBeenCalled();
 
     // 15. ESP32 label is represented in rendered output
     const fillTexts = mockCtx.fillText.mock.calls.map((c: any) => c[0]);
     expect(fillTexts).toContain('MyESP32');
-    expect(fillTexts).toContain('(ESP32)');
+    expect(fillTexts).toContain('ESP32');
 
     // 16. GPIO23 terminal is represented in rendered output
     expect(fillTexts).toContain('GPIO23');

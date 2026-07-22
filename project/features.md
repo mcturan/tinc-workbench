@@ -1,3 +1,0 @@
-# Features
-
-Feature catalog (draft).

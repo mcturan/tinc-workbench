@@ -1,4 +1,4 @@
-import { Coordinate, SemanticObject } from '../types';
+import { Coordinate, SemanticObject, WireSegment } from '../types';
 
 export interface Rect {
   x: number;
@@ -73,5 +73,15 @@ export class GeometryEngine {
     const y = component.properties.y ?? 0;
     const local = this.getTerminalLocalCoordinate(component.type, terminalId);
     return { x: x + local.x, y: y + local.y };
+  }
+
+  routeManhattan(start: Coordinate, end: Coordinate): WireSegment[] {
+    if (start.x === end.x || start.y === end.y) {
+      return [{ start: { ...start }, end: { ...end } }];
+    }
+    return [
+      { start: { ...start }, end: { x: end.x, y: start.y } },
+      { start: { x: end.x, y: start.y }, end: { ...end } },
+    ];
   }
 }

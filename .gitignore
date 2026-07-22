@@ -1,8 +1,25 @@
 # Dependency directory
-node_modules
+node_modules/
 
 # TypeScript build output
-dist
+dist/
+build/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
 
 # Test coverage output
-coverage
+coverage/
+
+# Temporary & Editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Caches
+.cache/
+.eslintcache

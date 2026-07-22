@@ -1,14 +1,25 @@
 {
   "name": "tinc-workbench",
-  "version": "1.0.0",
+  "version": "1.0.0-alpha.1",
   "description": "TINC Workbench Core Engine and Schematic Editor",
+  "author": "TINC Engineering",
+  "license": "MIT",
+  "keywords": [
+    "tinc",
+    "eda",
+    "schematic",
+    "pcb",
+    "hardware",
+    "engineering"
+  ],
   "main": "dist/index.js",
   "scripts": {
     "dev": "vite",
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "node -e \"const args = process.argv.slice(2).filter(a => a !== '--run' && a !== '--'); const cp = require('child_process'); const res = cp.spawnSync('jest', args, { stdio: 'inherit', shell: true }); process.exit(res.status ?? 0);\" --",
-    "lint": "eslint 'src/**/*.ts' 'tests/**/*.ts'"
+    "lint": "eslint 'src/**/*.ts' 'tests/**/*.ts'",
+    "start:harness": "vite --port 5174"
   },
   "devDependencies": {
     "@types/jest": "^29.5.12",

@@ -17,6 +17,14 @@ export class CanvasEngine {
     this.height = height;
   }
 
+  getWidth(): number {
+    return this.width;
+  }
+
+  getHeight(): number {
+    return this.height;
+  }
+
   getViewportState(): ViewportState {
     return { ...this.viewport };
   }

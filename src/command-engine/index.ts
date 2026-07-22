@@ -15,6 +15,7 @@ import {
 import { ObjectEngine } from '../object-engine';
 import { HistoryEngine } from '../history-engine';
 import { EventBus } from '../event-bus';
+import { GeometryEngine } from '../geometry-engine';
 
 export interface CommandHandler {
   validate(payload: any, objectEngine: ObjectEngine): void;
@@ -23,6 +24,9 @@ export interface CommandHandler {
 
 export class CommandEngine {
   private handlers: Map<string, CommandHandler> = new Map();
+  private boardManager?: any;
+  private symbolManager?: any;
+  private deviceManager?: any;
 
   constructor(
     private objectEngine: ObjectEngine,
@@ -30,6 +34,18 @@ export class CommandEngine {
     private eventBus: EventBus
   ) {
     this.registerDefaultHandlers();
+  }
+
+  setBoardManager(bm: any): void {
+    this.boardManager = bm;
+  }
+
+  setSymbolManager(sm: any): void {
+    this.symbolManager = sm;
+  }
+
+  setDeviceManager(dm: any): void {
+    this.deviceManager = dm;
   }
 
   registerHandler(name: string, handler: CommandHandler): void {
@@ -49,9 +65,24 @@ export class CommandEngine {
       // 2. Execution phase
       const delta = handler.execute(command.payload, this.objectEngine);
 
+      if (command.name.endsWith('Footprint') ||
+          command.name.endsWith('Footprints') ||
+          command.name === 'SetBoardOutline' ||
+          command.name.endsWith('Track') ||
+          command.name.endsWith('Tracks') ||
+          command.name.endsWith('Via') ||
+          command.name.endsWith('Zone') ||
+          command.name.endsWith('DeviceObject') ||
+          command.name === 'UpdateProjectDocumentation') {
+        for (const action of delta.forward) {
+          this.applyDeltaAction(action);
+        }
+      }
+
       // 3. History recording phase
       const nodeId = command.id;
       const parentId = this.historyEngine.getActiveNodeId();
+      const cleanDelta = sanitizeHistoryDelta(delta);
 
       try {
         const historyNode: HistoryNode = {
@@ -60,7 +91,7 @@ export class CommandEngine {
           commandId: command.id,
           description: `Executed ${command.name}`,
           timestamp: command.timestamp ?? Date.now(),
-          delta,
+          delta: cleanDelta,
         };
         this.historyEngine.pushNode(historyNode);
       } catch (historyError) {
@@ -113,6 +144,18 @@ export class CommandEngine {
         const handler = this.handlers.get(cmd.name)!;
         const delta = handler.execute(cmd.payload, this.objectEngine);
         appliedDeltas.push(delta);
+
+        if (cmd.name.endsWith('Footprint') ||
+            cmd.name.endsWith('Footprints') ||
+            cmd.name === 'SetBoardOutline' ||
+            cmd.name.endsWith('Track') ||
+            cmd.name.endsWith('Tracks') ||
+            cmd.name.endsWith('Via') ||
+            cmd.name.endsWith('Zone')) {
+          for (const action of delta.forward) {
+            this.applyDeltaAction(action);
+          }
+        }
       }
 
       // Merge all deltas
@@ -218,6 +261,98 @@ export class CommandEngine {
         break;
       case 'DELETE_WIRE':
         this.objectEngine.deleteWire(action.wireId);
+        break;
+      case 'MOVE_COMPONENT': {
+        const comp = this.objectEngine.getObject(action.componentId) as SemanticObject;
+        if (comp) {
+          comp.properties.x = action.x;
+          comp.properties.y = action.y;
+        }
+        if (action.wireUpdates) {
+          for (const update of action.wireUpdates) {
+            const wire = this.objectEngine.getWire(update.wireId);
+            if (wire) {
+              wire.segments = update.segments;
+            }
+          }
+        }
+        break;
+      }
+      case 'CREATE_FOOTPRINT':
+        if (this.boardManager) {
+          this.boardManager.addFootprint(action.boardId, action.footprint);
+        }
+        break;
+      case 'DELETE_FOOTPRINT':
+        if (this.boardManager) {
+          this.boardManager.removeFootprint(action.boardId, action.footprintId);
+        }
+        break;
+      case 'UPDATE_FOOTPRINT':
+        if (this.boardManager) {
+          const fp = this.boardManager.getBoard(action.boardId)?.footprints.find((f: any) => f.id === action.footprintId);
+          if (fp) {
+            Object.assign(fp, action.updates);
+          }
+        }
+        break;
+      case 'CREATE_PCB_OBJECT':
+        if (this.boardManager) {
+          this.boardManager.addObject(action.boardId, action.object);
+        }
+        break;
+      case 'DELETE_PCB_OBJECT':
+        if (this.boardManager) {
+          this.boardManager.removeObject(action.boardId, action.objectId);
+        }
+        break;
+      case 'UPDATE_PCB_OBJECT':
+        if (this.boardManager) {
+          const obj = this.boardManager.getBoard(action.boardId)?.objects.find((o: any) => o.id === action.objectId);
+          if (obj) {
+            Object.assign(obj, action.updates);
+          }
+        }
+        break;
+      case 'SET_BOARD_OUTLINE':
+        if (this.boardManager) {
+          this.boardManager.setBoardOutline(action.boardId, action.outline);
+        }
+        break;
+      case 'CREATE_SYMBOL_ITEM':
+        if (this.symbolManager) {
+          this.symbolManager.addItem(action.docId, action.item);
+        }
+        break;
+      case 'DELETE_SYMBOL_ITEM':
+        if (this.symbolManager) {
+          this.symbolManager.removeItem(action.docId, action.itemId);
+        }
+        break;
+      case 'UPDATE_SYMBOL_ITEM':
+        if (this.symbolManager) {
+          this.symbolManager.updateItem(action.docId, action.itemId, action.updates);
+        }
+        break;
+      case 'UPDATE_PROJECT_DOCUMENTATION': {
+        const project = this.objectEngine.getProject();
+        project.documentation = action.doc ? JSON.parse(JSON.stringify(action.doc)) : undefined;
+        break;
+      }
+      case 'CREATE_DEVICE_OBJECT':
+        if (this.deviceManager) {
+          this.deviceManager.addObject(action.layerId, action.object);
+        }
+        break;
+      case 'DELETE_DEVICE_OBJECT':
+        if (this.deviceManager) {
+          this.deviceManager.removeObject(action.objectId);
+        }
+        break;
+      case 'UPDATE_DEVICE_OBJECT':
+        if (this.deviceManager) {
+          this.deviceManager.updateObject(action.objectId, action.updates);
+        }
         break;
       default:
         throw new Error(`Unknown DeltaAction type: ${(action as any).type}`);
@@ -409,6 +544,59 @@ export class CommandEngine {
       },
     });
 
+    this.registerHandler('UpdateProjectDocumentation', {
+      validate(payload: any, oe: ObjectEngine) {
+        if (!payload || !('doc' in payload)) throw new Error('Missing documentation payload');
+      },
+      execute(payload: any, oe: ObjectEngine) {
+        const doc = payload.doc ? JSON.parse(JSON.stringify(payload.doc)) : undefined;
+        const prevDoc = oe.getProject().documentation ? JSON.parse(JSON.stringify(oe.getProject().documentation)) : undefined;
+        // Don't call oe.getProject() mutation here, the delta application does it.
+        return {
+          forward: [{ type: 'UPDATE_PROJECT_DOCUMENTATION', doc }],
+          reverse: [{ type: 'UPDATE_PROJECT_DOCUMENTATION', doc: prevDoc }],
+        };
+      }
+    });
+
+    this.registerHandler('CreateDeviceObject', {
+      validate(payload: any) {
+        if (!payload.layerId || !payload.object) throw new ValidationError('Missing layerId or object');
+      },
+      execute(payload: any) {
+        return {
+          forward: [{ type: 'CREATE_DEVICE_OBJECT', layerId: payload.layerId, object: payload.object }],
+          reverse: [{ type: 'DELETE_DEVICE_OBJECT', objectId: payload.object.id }]
+        };
+      }
+    });
+
+    this.registerHandler('DeleteDeviceObject', {
+      validate(payload: any) {
+         if (!payload.objectId) throw new ValidationError('Missing objectId');
+      },
+      execute(payload: any, oe: ObjectEngine) {
+        // Need a reference to deviceManager to get the full object clone.
+        // We assume payload includes 'objectClone' if we want reverse.
+        return {
+          forward: [{ type: 'DELETE_DEVICE_OBJECT', objectId: payload.objectId }],
+          reverse: payload.objectClone ? [{ type: 'CREATE_DEVICE_OBJECT', layerId: payload.layerId, object: payload.objectClone }] : []
+        };
+      }
+    });
+
+    this.registerHandler('UpdateDeviceObject', {
+      validate(payload: any) {
+         if (!payload.objectId || !payload.updates) throw new ValidationError('Missing objectId or updates');
+      },
+      execute(payload: any) {
+        return {
+          forward: [{ type: 'UPDATE_DEVICE_OBJECT', objectId: payload.objectId, updates: payload.updates }],
+          reverse: [{ type: 'UPDATE_DEVICE_OBJECT', objectId: payload.objectId, updates: payload.reverseUpdates }]
+        };
+      }
+    });
+
     // 9. DeleteWire
     this.registerHandler('DeleteWire', {
       validate(payload: any, objectEngine: ObjectEngine) {
@@ -429,5 +617,103 @@ export class CommandEngine {
         };
       },
     });
+
+    // 10. MoveComponent
+    this.registerHandler('MoveComponent', {
+      validate(payload: any, objectEngine: ObjectEngine) {
+        const comp = objectEngine.getObject(payload.componentId);
+        if (!comp) {
+          throw new ValidationError(`Component ${payload.componentId} not found`);
+        }
+      },
+      execute(payload: any, objectEngine: ObjectEngine) {
+        const comp = objectEngine.getObject(payload.componentId) as SemanticObject;
+        const oldX = comp.properties.x ?? 0;
+        const oldY = comp.properties.y ?? 0;
+
+        // Apply new coordinates temporarily to resolve new terminal locations
+        comp.properties.x = payload.x;
+        comp.properties.y = payload.y;
+
+        const geometryEngine = new GeometryEngine();
+        const affectedWires: { wireId: string; oldSegments: any[]; newSegments: any[] }[] = [];
+
+        for (const conn of objectEngine.getConnections()) {
+          const sourceComp = conn.source.type !== 'FLOATING' ? objectEngine.getComponentByTerminalId(conn.source.targetId) : undefined;
+          const targetComp = conn.target.type !== 'FLOATING' ? objectEngine.getComponentByTerminalId(conn.target.targetId) : undefined;
+
+          const sourceIsAffected = sourceComp !== undefined && sourceComp.id === payload.componentId;
+          const targetIsAffected = targetComp !== undefined && targetComp.id === payload.componentId;
+
+          if (sourceIsAffected || targetIsAffected) {
+            const wire = objectEngine.getWires().find(w => w.logicalConnectionId === conn.id);
+            if (wire) {
+              const oldSegments = JSON.parse(JSON.stringify(wire.segments));
+
+              let startPt = oldSegments[0].start;
+              let endPt = oldSegments[oldSegments.length - 1].end;
+
+              if (conn.source.type !== 'FLOATING' && sourceComp) {
+                startPt = geometryEngine.getTerminalWorldCoordinate(sourceComp, conn.source.targetId);
+              }
+              if (conn.target.type !== 'FLOATING' && targetComp) {
+                endPt = geometryEngine.getTerminalWorldCoordinate(targetComp, conn.target.targetId);
+              }
+
+              const newSegments = geometryEngine.routeManhattan(startPt, endPt);
+              affectedWires.push({
+                wireId: wire.id,
+                oldSegments,
+                newSegments,
+              });
+            }
+          }
+        }
+
+        // Apply the new segments to the actual wires in the engine
+        for (const update of affectedWires) {
+          const wire = objectEngine.getWire(update.wireId)!;
+          wire.segments = update.newSegments;
+        }
+
+        return {
+          forward: [
+            {
+              type: 'MOVE_COMPONENT',
+              componentId: payload.componentId,
+              x: payload.x,
+              y: payload.y,
+              wireUpdates: affectedWires.map(w => ({ wireId: w.wireId, segments: w.newSegments }))
+            }
+          ],
+          reverse: [
+            {
+              type: 'MOVE_COMPONENT',
+              componentId: payload.componentId,
+              x: oldX,
+              y: oldY,
+              wireUpdates: affectedWires.map(w => ({ wireId: w.wireId, segments: w.oldSegments }))
+            }
+          ],
+        };
+      },
+    });
   }
+}
+
+function sanitizeHistoryDelta(obj: any): any {
+  if (obj === null || typeof obj !== 'object') {
+    return obj;
+  }
+  if (Array.isArray(obj)) {
+    return obj.map(sanitizeHistoryDelta);
+  }
+  const result: any = {};
+  for (const key of Object.keys(obj)) {
+    const val = obj[key];
+    if (val !== undefined) {
+      result[key] = sanitizeHistoryDelta(val);
+    }
+  }
+  return result;
 }

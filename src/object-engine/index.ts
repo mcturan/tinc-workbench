@@ -35,6 +35,18 @@ export class ObjectEngine {
     return this.project;
   }
 
+  clear(): void {
+    this.project = { id: this.project.id, name: this.project.name, pages: [] };
+    this.registry.clear();
+    this.entityKinds.clear();
+    this.portPinMap.clear();
+    this.connections.clear();
+    this.wires.clear();
+
+    this.registry.set(this.project.id, this.project);
+    this.entityKinds.set(this.project.id, 'Project');
+  }
+
   getObject(id: string): CanonicalEntity | undefined {
     return this.registry.get(id);
   }
@@ -293,6 +305,20 @@ export class ObjectEngine {
 
   getLogicalConnection(id: string): LogicalConnection | undefined {
     return this.connections.get(id);
+  }
+
+  getConnections(): LogicalConnection[] {
+    return Array.from(this.connections.values());
+  }
+
+  getWires(): Wire[] {
+    return Array.from(this.wires.values());
+  }
+
+  getComponentByTerminalId(terminalId: string): SemanticObject | undefined {
+    const compId = this.portPinMap.get(terminalId);
+    if (!compId) return undefined;
+    return this.getObject(compId) as SemanticObject;
   }
 
   private validateEndpoint(endpoint: Endpoint): void {
